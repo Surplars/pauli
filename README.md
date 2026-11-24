@@ -8,7 +8,7 @@ as its host or depend on its scheduler, VFS, Kconfig or tools. Linux is
 optional: the host monitor can manage a small RTOS VM and a bare service
 with neither a management OS nor a disk. See [the diskless example](docs/firmware-guests.md).
 
-The [Valence Wave8 OoO firmware](docs/porting-board.md#valence-wave8-ooo-firmware-handoff)
+The [Valence firmware](docs/porting-board.md#valence-firmware-handoff)
 is an OpenSBI HS payload. It boots an embedded integer guest by default, or a
 [packaged external Linux guest](docs/wave8-external-guest.md) without relinking.
 On a physical external-Linux boot the UART goes directly to Linux. The

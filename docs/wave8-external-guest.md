@@ -13,7 +13,7 @@ The addresses below are RISC-V addresses, **not** PS-side DDR aliases.
 ## Build and stage in a separate package
 
 1. From the `pauli` repository root, build the OpenSBI next-stage payload:
-   `cargo xtask image --board valence-wave8-ooo --output target/wave8-hv.bin`.
+   `cargo xtask image --board valence --output target/wave8-hv.bin`.
    Choose a fresh output name. Put this **flat binary, not its ELF**, in
    the old Linux payload slot at HPA `0x80200000`. Keep the whole range
    `[0x80200000,0x81000000)` for HS (file, BSS, stack, host arenas).
@@ -31,24 +31,24 @@ The addresses below are RISC-V addresses, **not** PS-side DDR aliases.
    `0x89000000`. The r1 BusyBox package already places its LZ4 initramfs at
    `[0x81000000,0x884a970b)` (122,328,843 bytes); no second source copy
    is needed. Sources remain immutable across VM stops/cold starts.
-4. Append [the native DTS fragment](../configs/boards/valence-wave8-ooo-linux.dtsi)
+4. Append [the native DTS fragment](../configs/boards/valence-linux.dtsi)
    to **ooo-busybox.dts**, not the in-order tree. In the source package's DT
    bundle replace the OoO slot with this compiled tree. From the `pauli` repository root,
    with `WAVE8` naming the original release and `OUT` a separate OS staging
    directory, a local `dtc` can generate it without touching the originals:
 
    ```sh
-   cat "$WAVE8/ooo-busybox.dts" configs/boards/valence-wave8-ooo-linux.dtsi |
+   cat "$WAVE8/ooo-busybox.dts" configs/boards/valence-linux.dtsi |
      dtc -I dts -O dtb -p 4096 -o "$OUT/ooo-hv-linux.dtb" -
    ```
 
-   For the management domain, append [one further fragment](../configs/boards/valence-wave8-ooo-manager.dtsi);
+   For the management domain, append [one further fragment](../configs/boards/valence-manager.dtsi);
    this replaces **only** the role. Use this tree *instead of* the guest tree
    in the OoO slot:
 
    ```sh
-   cat "$WAVE8/ooo-busybox.dts" configs/boards/valence-wave8-ooo-linux.dtsi \
-       configs/boards/valence-wave8-ooo-manager.dtsi |
+   cat "$WAVE8/ooo-busybox.dts" configs/boards/valence-linux.dtsi \
+       configs/boards/valence-manager.dtsi |
      dtc -I dts -O dtb -p 4096 -o "$OUT/ooo-hv-manager.dtb" -
    ```
 
@@ -80,7 +80,7 @@ Set `NATIVE_DTB` to the chosen output, e.g. `"$OUT/ooo-hv-manager.dtb"`:
 
 ```sh
 WAVE8_BUNDLE="$WAVE8" WAVE8_EXTERNAL_DTB="$NATIVE_DTB" \
-  cargo test --offline --locked -p valence-wave8-ooo packaged_external_guest_plan -- --ignored --nocapture
+  cargo test --offline --locked -p valence packaged_external_guest_plan -- --ignored --nocapture
 ```
 
 ## What Linux receives

@@ -1,6 +1,6 @@
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
-//! Valence Wave8 OoO OpenSBI payload; no physical disk, network or RTC.
+//! Valence OpenSBI payload; no physical disk, network or RTC.
 //! Ownership/Lock Ordering: single boot hart and static board wiring; core owns VMs.
 //! Invariants: use only delegated S-APLIC/S-file, no IMSIC CPU-MMIO access.
 #[cfg(any(target_os = "none", test))]

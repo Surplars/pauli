@@ -117,7 +117,7 @@ pub unsafe fn prepare(hart: usize, dtb: usize) -> Result<&'static Wave8> {
         boot_cpu: 0,
     };
     pauli_hal::hv_info!(
-        "Valence Wave8 OoO: HS hart 0, timebase {} Hz, {:?} guest\r",
+        "Valence: HS hart 0, timebase {} Hz, {:?} guest\r",
         TIMEBASE_HZ,
         payload
     );

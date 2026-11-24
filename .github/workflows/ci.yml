@@ -23,10 +23,10 @@ jobs:
           cargo xtask build --board qemu-virt-riscv --features aia,aia-guest-file
           cargo xtask build --board qemu-virt-riscv --features guest-control
           cargo xtask build --board qemu-virt-riscv --features selftest
-      - name: Build valence-wave8-ooo board matrix
+      - name: Build valence board matrix
         run: |
-          cargo xtask build --board valence-wave8-ooo
-          cargo xtask build --board valence-wave8-ooo --features selftest
+          cargo xtask build --board valence
+          cargo xtask build --board valence --features selftest
       - name: Run Linux tool host tests
         run: make -C integrations/linux/tool test
       - name: Run Python tooling unit tests

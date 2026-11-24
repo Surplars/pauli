@@ -51,7 +51,7 @@ guest MMIO layout just because the physical layout differs.
 | Board | Payload entry | Timebase | Native topology |
 | --- | --- | --- | --- |
 | QEMU virt | `0x80200000` | 10 MHz in the launch profile, checked against FDT | 1-64 harts; FDT PLIC or APLIC/IMSIC, UART, optional VirtIO/RTC |
-| Valence Wave8 OoO | `0x80200000` | 100 MHz | Hart 0; S-APLIC/IMSIC and NS16550A, 14 MiB payload window |
+| Valence | `0x80200000` | 100 MHz | Hart 0; S-APLIC/IMSIC and NS16550A, 14 MiB payload window |
 
 QEMU reads the native FDT from OpenSBI. Optional `/chosen` cells
 `openion,boot-config` and `openion,guest-dtbs` are big-endian 64-bit host
@@ -59,20 +59,20 @@ addresses; the standard launcher instead uses the offsets in
 `pauli_config::loader` relative to physical RAM. The board must reserve the
 whole template span and the exact nonoverlapping guest assignments.
 
-### Valence Wave8 OoO firmware handoff
+### Valence firmware handoff
 
 Target: Wave8 OoO RTL implementing `senvcfg` (CSR 0x10a), with the
 `wave8-cmu-20261123-r1` loader and memory layout. Do not use the original
 r1 bitstream that lacked this CSR, or the InOrder bitstream. The OS/integration
 task owns the outer image, its CRCs and the loader. Build the standalone HS
-payload from `hypervisor/`:
+payload from the repository root:
 
 ```sh
-cargo xtask image --board valence-wave8-ooo
+cargo xtask image --board valence
 ```
 
-This builds the symbol-bearing `target/riscv64imac-unknown-none-elf/release/valence-wave8-ooo`
-and writes `valence-wave8-ooo.bin` alongside it. Use the **flat `.bin`** as the
+This builds the symbol-bearing `target/riscv64imac-unknown-none-elf/release/valence`
+and writes `valence.bin` alongside it. Use the **flat `.bin`** as the
 RV payload, not the ELF or a replacement for `fw_dynamic.bin`. An existing
 `.bin` is never overwritten: use `--output <new-path>` to keep another build.
 
@@ -96,7 +96,7 @@ private guest RAM and supplies a **virtual** DTB. The stock **preboot** checks
 change preboot deliberately in the OS/image task.
 
 To preflight the package's DTBs without the board, point `WAVE8_BUNDLE` at the
-delivery directory and run `cargo test -p valence-wave8-ooo packaged_handoff -- --ignored`.
+delivery directory and run `cargo test -p valence packaged_handoff -- --ignored`.
 This runs the same validator used at entry; it does not execute any OpenSBI or HS code.
 
 First board acceptance: capture the host banner, the embedded guest's

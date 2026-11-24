@@ -5,7 +5,7 @@ members = [
     "crates/pauli-drivers/virtio-net", "crates/pauli-drivers/ns16550a", "crates/pauli-drivers/goldfish-rtc",
     "crates/pauli-arch-riscv",
     "crates/pauli-core",
-    "boards/qemu-virt-riscv", "boards/valence-wave8-ooo",
+    "boards/qemu-virt-riscv", "boards/valence",
     "xtask", "xtask/guest",
 ]
 resolver = "3"

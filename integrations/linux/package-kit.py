@@ -21,8 +21,8 @@ def main():
         p.error("missing kernel release in module vermagic")
     files = {
         "README.md": (source / "WAVE9-HANDOFF.md", 0o644),
-        "firmware/valence-wave8-ooo-250k.bin": (args.firmware, 0o644),
-        "firmware/valence-wave8-ooo-250k.elf": (args.elf, 0o644),
+        "firmware/valence-250k.bin": (args.firmware, 0o644),
+        "firmware/valence-250k.elf": (args.elf, 0o644),
         "rootfs/usr/sbin/paulictl": (args.paulictl, 0o755),
         f"rootfs/lib/modules/{release[1].decode()}/extra/pauli.ko": (args.module, 0o644),
     }

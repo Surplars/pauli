@@ -4,8 +4,8 @@
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::BTreeMap;
 const HELP: &str = "cargo xtask test
-cargo xtask build --board <qemu-virt-riscv|valence-wave8-ooo> [--features LIST] [--release]
-cargo xtask image --board valence-wave8-ooo [--output PATH]
+cargo xtask build --board <qemu-virt-riscv|valence> [--features LIST] [--release]
+cargo xtask image --board valence [--output PATH]
 cargo xtask run --vm PROFILE --kernel IMAGE [--initrd ARCHIVE] [--host-cpus N] [--host-memory-mib N]
     [--disk RAW] [--persistent] [--features LIST] [--aia-host] [--dry-run]
 cargo xtask run --rtos-elf CONTROL --service-elf SERVICE [--host-cpus N] [--dry-run]

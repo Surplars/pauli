@@ -5,7 +5,7 @@ This is an integration kit, not a replacement boot disk. Verify its
 
 | File in the kit | Where it goes |
 | --- | --- |
-| `firmware/valence-wave8-ooo-250k.bin` | HS payload slot, RV load/entry `0x80200000`, **outside** the rootfs |
+| `firmware/valence-250k.bin` | HS payload slot, RV load/entry `0x80200000`, **outside** the rootfs |
 | `rootfs/usr/sbin/paulictl` | Linux rootfs, executable (0755); statically linked RV64 |
 | `rootfs/lib/modules/7.4.0-rc1-valence-smp-debian-r2+/extra/pauli.ko` | Only the currently shipped Wave9 Image; for a new kernel rebuild from `source/driver` or build in |
 

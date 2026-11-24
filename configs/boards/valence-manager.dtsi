@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
-// Append AFTER valence-wave8-ooo-linux.dtsi. The Image, initrd and DDR loan
+// Append AFTER valence-linux.dtsi. The Image, initrd and DDR loan
 // are unchanged. The HS monitor, not this declaration, grants control rights.
 &{/chosen} {
     openion,guest-role = "manager";

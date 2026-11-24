@@ -22,7 +22,7 @@ pub struct Board {
 impl Board {
     pub fn load(root: &Path, name: &str) -> Result<Self> {
         ensure!(
-            matches!(name, "qemu-virt-riscv" | "valence-wave8-ooo"),
+            matches!(name, "qemu-virt-riscv" | "valence"),
             "unknown board {name}"
         );
         let path = root.join("configs/boards").join(format!("{name}.toml"));

@@ -4,7 +4,7 @@ use super::*;
 #[test]
 fn wave8_uses_the_flat_package_payload_slot_and_cannot_launch_as_qemu_virt() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let board = Board::load(&root, "valence-wave8-ooo")?;
+    let board = Board::load(&root, "valence")?;
     // FW_DYNAMIC's next address through the first byte of the separate initrd slot.
     assert_eq!(
         (board.entry, board.entry + board.limit),
