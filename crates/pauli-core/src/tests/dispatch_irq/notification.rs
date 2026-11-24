@@ -57,6 +57,8 @@ fn destructive_guest_uart_read_notifies_a_colocated_sibling_but_not_itself() {
             link: m.link(),
             now: || 0,
             trace: &mut NoopTracer,
+            console_tx: false,
+            console_full: false,
         };
         assert_eq!(io.mmio(reg(uart, 1, None)), Some(b'R' as usize));
         assert_eq!(dev.wake.swap(0, Ordering::AcqRel), falling_wakes);

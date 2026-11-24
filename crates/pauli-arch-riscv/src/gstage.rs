@@ -206,6 +206,33 @@ impl GStagePageTable {
         Ok(())
     }
 
+    /// Assign one private 1 GiB RAM extent to a guest OS. The guest manages
+    /// its own text/data protections; ordinary `map_page` still enforces W^X.
+    /// # Safety
+    /// The entire aligned HPA extent must be exclusively assigned, retained
+    /// guest RAM, excluded from host allocation. Never use for shared RAM,
+    /// host/kernel memory or MMIO. Edit only while the VM is inactive.
+    pub unsafe fn map_private_ram_1g(
+        &mut self,
+        gpa: PhysAddr,
+        hpa: PhysAddr,
+    ) -> Result<(), MmError> {
+        const SIZE: usize = 1 << 30;
+        let vpn = Self::indices(gpa.raw())?;
+        if !gpa.is_aligned(SIZE) || !hpa.is_aligned(SIZE) {
+            return Err(MmError::InvalidAlignment);
+        }
+        if hpa.raw() >= (1usize << 56) {
+            return Err(MmError::InvalidRegion);
+        }
+        let slot = &mut self.root.entries[vpn[2]];
+        if *slot & V != 0 {
+            return Err(MmError::AlreadyMapped);
+        }
+        *slot = V | R | W | X | U | AD | (((hpa.raw() >> 12) as u64) << 10);
+        Ok(())
+    }
+
     /// Resolve trusted G-stage leaves, including private-RAM superpages.
     fn leaf(&self, gpa: PhysAddr) -> Option<(u64, usize)> {
         let vpn = Self::indices(gpa.raw()).ok()?;

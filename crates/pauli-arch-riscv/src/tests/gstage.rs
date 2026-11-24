@@ -100,3 +100,39 @@ fn fixed_context_preserves_policy_separation() {
     c.vsstatus = usize::MAX; // Guest CSR fields do not provision F/D or file access.
     assert_eq!((c.fp_enabled, c.guest_file), (0, 0));
 }
+
+#[test]
+fn gigabyte_superpage_maps_without_lower_tables_and_rejects_bad_extents() {
+    let mut t = table(0);
+    let gpa = A::new(0x8000_0000);
+    let hpa = A::new(0xc000_0000);
+    // SAFETY: scalar model extents represent exclusive disjoint retained RAM.
+    unsafe {
+        assert_eq!(
+            t.map_private_ram_1g(A::new(gpa.raw() + (1 << 21)), hpa),
+            Err(MmError::InvalidAlignment)
+        );
+        assert_eq!(
+            t.map_private_ram_1g(gpa, A::new(hpa.raw() + (1 << 21))),
+            Err(MmError::InvalidAlignment)
+        );
+        assert_eq!(
+            t.map_private_ram_1g(A::new(1 << 41), hpa),
+            Err(MmError::InvalidRegion)
+        );
+        assert_eq!(
+            t.map_private_ram_1g(gpa, A::new(1 << 56)),
+            Err(MmError::InvalidRegion)
+        );
+        t.map_private_ram_1g(gpa, hpa).unwrap();
+        assert_eq!(t.map_private_ram_1g(gpa, hpa), Err(MmError::AlreadyMapped));
+    }
+    for offset in [0, 0x1234_5678, (1 << 30) - 1] {
+        let addr = A::new(gpa.raw() + offset);
+        assert_eq!(t.translate(addr).unwrap().raw(), hpa.raw() + offset);
+        assert_eq!(t.translate_readable(addr).unwrap().raw(), hpa.raw() + offset);
+        assert!(t.is_executable(addr));
+    }
+    assert_eq!(t.translate(A::new(gpa.raw() - 1)), None);
+    assert_eq!(t.translate(A::new(gpa.raw() + (1 << 30))), None);
+}

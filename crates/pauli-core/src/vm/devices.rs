@@ -244,35 +244,57 @@ impl<I: VirtualIrqChip> VmDevices<I> {
         clock: impl FnOnce() -> u64,
         link: &SpinLock<Link>,
     ) -> Option<usize> {
+        self.access_io(origin, access, clock, link).0
+    }
+    fn access_io(
+        &self,
+        origin: Option<u8>,
+        access: MmioAccess,
+        clock: impl FnOnce() -> u64,
+        link: &SpinLock<Link>,
+    ) -> (Option<usize>, bool, bool) {
         // Only the issuer is certain to sample the chip before its next entry.
         let exclude = origin.map_or(0, |cpu| 1usize << cpu);
-        let (device, offset) = self.bus.resolve(access)?;
+        let Some((device, offset)) = self.bus.resolve(access) else {
+            return (None, false, false);
+        };
         if let DeviceId::Irq(region) = device {
             if access.width != 4 {
-                return None;
+                return (None, false, false);
             }
             // A claim read can also lower another context's external interrupt.
-            return self.change_irqs(exclude, |chip| chip.access(region, offset, access.write));
+            return (
+                self.change_irqs(exclude, |chip| chip.access(region, offset, access.write)),
+                false,
+                false,
+            );
         }
         let mut io = self.io.lock();
         let now = clock();
         io.console.uart.advance(now);
         io.rtc.advance(now);
         self.levels(&mut io, exclude); // Latch timeout before destructive RBR/IIR reads.
+        let mut console_tx = false;
+        let mut console_full = false;
         let value = match device {
             DeviceId::Uart if access.width == 1 || access.width == 4 => {
-                io.console.access(offset, access.write)
+                let value = io.console.access(offset, access.write);
+                if access.write.is_some() {
+                    console_tx = true;
+                    console_full = io.console.is_full();
+                }
+                value
             }
-            DeviceId::Block if access.width == 4 => io.block.as_mut()?.access(offset, access.write),
+            DeviceId::Block if access.width == 4 => io.block.as_mut().and_then(|b| b.access(offset, access.write)),
             DeviceId::Net => io
                 .net
-                .as_mut()?
-                .access(offset, access.width, access.write, link),
+                .as_mut()
+                .and_then(|n| n.access(offset, access.width, access.write, link)),
             DeviceId::Rtc if access.width == 4 => io.rtc.access(offset, access.write),
             _ => None,
         };
         self.levels(&mut io, exclude);
-        value
+        (value, console_tx, console_full)
     }
     pub fn stop(&self, now: u64, link: &SpinLock<Link>) -> Result<bool> {
         let mut io = self.io.lock();
@@ -361,12 +383,18 @@ pub(crate) struct DeviceIo<'a, I: VirtualIrqChip, R: Tracer> {
     pub link: &'a SpinLock<Link>,
     pub now: fn() -> u64,
     pub trace: &'a mut R,
+    pub console_tx: bool,
+    pub console_full: bool,
 }
 impl<I: VirtualIrqChip, R: Tracer> GuestIo for DeviceIo<'_, I, R> {
     fn mmio(&mut self, access: MmioAccess) -> Option<usize> {
         self.trace.on_mmio(access.gpa, access.write.is_some());
-        self.devices
-            .access_from(Some(self.origin), access, self.now, self.link)
+        let (value, console_tx, console_full) =
+            self.devices
+                .access_io(Some(self.origin), access, self.now, self.link);
+        self.console_tx |= console_tx;
+        self.console_full |= console_full;
+        value
     }
     fn register(&mut self, cpu: u8, access: RegisterAccess) -> Option<usize> {
         self.devices

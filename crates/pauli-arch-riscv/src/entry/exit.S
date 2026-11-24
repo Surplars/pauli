@@ -39,6 +39,9 @@
     // From here on only the trusted host stack is used.
     // VS may clear/forge its own FS after writing FP registers. HS FS remains
     // enabled for an F/D vCPU, so save unconditionally, then restore the host.
+    // Resident mode (HOST_MODE != 0) keeps F/D live until Resident::put().
+    ld t1, HOST_MODE(sp)
+    bnez t1, .Lfp_exit_done
     ld t2, CTX_FP_ENABLED(t0)
     beqz t2, .Lfp_exit_done
     fp_save t0, CTX_FP

@@ -1,9 +1,4 @@
 #![no_std]
-#![expect(
-    internal_features,
-    reason = "nightly's volatile bulk copy/set are used only for retired RAM"
-)]
-#![feature(core_intrinsics)]
 //! Architecture-neutral VMM ownership, scheduling, management and device bridges.
 //! Ownership/Lock Ordering: manager -> vCPU metadata -> devices -> links/drivers.
 //! Invariants: no lock spans guest execution; RAM reuse follows CPU and I/O join.

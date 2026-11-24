@@ -179,7 +179,7 @@ pub trait Resident<V: ArchVcpu>: Sized {
     /// # Safety
     /// Pinned native owner, IRQs masked until put/drop, no reentrant execution.
     unsafe fn new() -> Self;
-    fn put(&mut self);
+    fn put(&mut self, vcpu: &mut V);
     fn load_interrupts(&mut self, _vcpu: &mut V, _chip: &mut V::Irq) -> Result<()> {
         Ok(())
     }

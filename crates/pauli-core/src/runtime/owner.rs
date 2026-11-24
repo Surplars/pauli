@@ -47,6 +47,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         slot: &VcpuSlot<A::Vcpu>,
         local: &mut Dispatcher<A::Timer, R>,
         visit: Visit,
+        sole: bool,
     ) -> Result<bool> {
         if !vm.lifecycle.acquire_owner(slot.index) {
             return Ok(false);
@@ -93,7 +94,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             vm.lifecycle.release_owner(slot.index);
             return Err(HvError::InvalidState);
         };
-        let result = self.owned_step(vm, slot, &mut owned, local, visit);
+        let result = self.owned_step(vm, slot, &mut owned, local, visit, sole);
         if result.is_err() {
             vm.request_stop(true, false);
         }
@@ -116,6 +117,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         owned: &mut Owned<A::Vcpu>,
         local: &mut Dispatcher<A::Timer, R>,
         visit: Visit,
+        sole: bool,
     ) -> Result<bool> {
         // SAFETY: matching off-CPU context, banks not loaded, IRQ-masked pinned owner.
         let notify = unsafe { slot.mailbox.lock().drain(&mut owned.cpu) }?;
@@ -146,7 +148,26 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         let Some(peer) = visit.peer().filter(|_| owned.state == CpuState::Runnable) else {
             return Ok(false);
         };
-        let grant = deadline::Grant::new(A::Timer::now(), vm.quantum, peer, owned.protected_ticks)?;
+        let info = self.board.info();
+        let uncontended = sole
+            && matches!(visit, Visit::Regular(_))
+            && B::UNCONTENDED_QUANTUM_US.is_some()
+            && (slot.owner != info.boot_cpu
+                || (B::IRQ_DRIVEN_CONSOLE
+                    && self.manager.config.disks.iter().all(Option::is_none)
+                    && !vm.config.net_uplink
+                    && vm.config.net_peer.is_none()));
+        let slice_ticks = if uncontended {
+            let us = B::UNCONTENDED_QUANTUM_US.unwrap_or(0);
+            us.saturating_mul(info.timebase_hz)
+                .checked_div(1_000_000)
+                .unwrap_or(vm.quantum)
+                .max(vm.quantum)
+        } else {
+            vm.quantum
+        };
+        let start = A::Timer::now();
+        let grant = deadline::Grant::new(start, slice_ticks, peer, owned.protected_ticks)?;
         // SAFETY: only this IRQ-masked owner can enter. Parked/mailbox-only work
         // never borrows a bank; even a partially failed load is put before retirement.
         let mut bank = unsafe { <A::Vcpu as ArchVcpu>::Resident::new() };
@@ -154,14 +175,23 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             Visit::Due { offer, .. } => grant.deadline.min(offer.until),
             _ => grant.deadline,
         };
-        let result = self.run_slice(vm, slot, owned, &mut bank, local, deadline);
+        let result = self.run_slice(
+            vm,
+            slot,
+            owned,
+            &mut bank,
+            local,
+            deadline,
+            uncontended,
+            start.saturating_add(vm.quantum),
+        );
         if let Ok(entered) = result
             && owned.state == CpuState::Runnable
         {
             // Bank teardown is host work after the slice, not service to this lane.
             owned.protected_ticks = grant.remaining(entered, A::Timer::now);
         }
-        bank.put();
+        bank.put(&mut owned.cpu);
         bank.put_interrupts(&mut owned.cpu, &mut vm.devices.irqs.lock())?;
         if matches!(result, Ok(true)) {
             // Stamp the served turn while lifecycle ownership still pins this epoch.
@@ -194,8 +224,11 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         bank: &mut <A::Vcpu as ArchVcpu>::Resident,
         local: &mut Dispatcher<A::Timer, R>,
         deadline: u64,
+        uncontended: bool,
+        flush_deadline: u64,
     ) -> Result<bool> {
         let mut entered = false;
+        let mut wrote_console = false;
         while vm.lifecycle.can_enter() && A::Timer::now() < deadline {
             slot.entered();
             entered = true;
@@ -222,6 +255,8 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 link: self.manager.link(),
                 now: A::Timer::now,
                 trace: &mut local.tracer,
+                console_tx: false,
+                console_full: false,
             };
             // SAFETY: exclusive owned CPU, immutable retained space, scoped bank,
             // sole native timer and one absolute deadline; all locks released.
@@ -234,6 +269,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                     resident: bank,
                 })
             }?;
+            let (console_tx, console_full) = (io.console_tx, io.console_full);
             let elapsed = if R::MEASURE_ELAPSED {
                 A::Timer::now().wrapping_sub(began)
             } else {
@@ -241,7 +277,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             };
             local.tracer.on_vm_exit(slot.index, exit.kind, elapsed);
             if let arch::ExitKind::Control(control) = exit.kind {
-                bank.put();
+                bank.put(&mut owned.cpu);
                 bank.put_interrupts(&mut owned.cpu, &mut vm.devices.irqs.lock())?;
                 let (state, wait) = self.control(vm, slot, &mut owned.cpu, control)?;
                 owned.state = state;
@@ -259,9 +295,15 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                     }
                 }
             }
+            wrote_console |= console_tx;
+            let console_flush = uncontended
+                && slot.owner == self.board.info().boot_cpu
+                && (self.board.console_rx_queued()
+                    || (wrote_console && (console_full || A::Timer::now() >= flush_deadline)));
             if owned.state != CpuState::Runnable
                 || exit.native_event
                 || exit.deadline_reached
+                || console_flush
                 || vm.devices.wake.load(Ordering::Acquire) != 0
             {
                 break;

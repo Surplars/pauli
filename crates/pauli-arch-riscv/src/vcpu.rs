@@ -95,6 +95,9 @@ impl VirtualCpu {
     pub fn context(&self) -> &VCpuContext {
         &self.ctx
     }
+    pub(crate) fn context_mut(&mut self) -> &mut VCpuContext {
+        &mut self.ctx
+    }
     pub fn timer(&self) -> VirtualTimer {
         self.timer
     }

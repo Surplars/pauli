@@ -56,7 +56,7 @@ impl Resident<Cpu> for Bank {
             file: false,
         }
     }
-    fn put(&mut self) {
+    fn put(&mut self, _cpu: &mut Cpu) {
         self.base = false;
     }
     fn load_interrupts(&mut self, cpu: &mut Cpu, chip: &mut Irqs) -> Result<()> {

@@ -40,6 +40,9 @@ pub trait Board: Send + Sync + 'static {
     /// Native console RX wakes the boot hart; a diskless, console-only board
     /// can defer its fallback polling for up to one millisecond.
     const IRQ_DRIVEN_CONSOLE: bool = false;
+    /// Optional extended slice (microseconds) when a single Ready vCPU is the
+    /// sole active lane on its physical hart. Defaults to None (exact vm.quantum).
+    const UNCONTENDED_QUANTUM_US: Option<u64> = None;
 
     fn info(&self) -> BoardInfo;
     fn layout(&self) -> GuestBoardLayout {

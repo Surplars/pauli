@@ -78,7 +78,7 @@
 .endm
 
 .option push
-.option arch, +h
+.option arch, +h, +d
 .section .text
 .balign 4
 .global pauli_guest_load
@@ -95,4 +95,53 @@ pauli_guest_put:
     resident_restore a0, a1
     ret
 .size pauli_guest_put, .-pauli_guest_put
+
+// a0 = *mut FloatState (host_fp), a1 = *mut usize (host_fs), a2 = *const FloatState (guest_fp)
+.balign 4
+.global pauli_fp_load
+.type pauli_fp_load, @function
+pauli_fp_load:
+    csrr t0, sstatus
+    li t1, FS_DIRTY
+    and t0, t0, t1
+    sd t0, 0(a1)
+    li t1, FP_VECTOR_MASK
+    csrc sstatus, t1
+    li t1, FS_DIRTY
+    csrs sstatus, t1
+    fp_save a0, 0
+    fp_restore a2, 0
+    ret
+.size pauli_fp_load, .-pauli_fp_load
+
+// a0 = *mut FloatState (guest_fp), a1 = *const FloatState (host_fp), a2 = usize (host_fs)
+.balign 4
+.global pauli_fp_put
+.type pauli_fp_put, @function
+pauli_fp_put:
+    li t1, FS_DIRTY
+    csrs sstatus, t1
+    fp_save a0, 0
+    fp_restore a1, 0
+    li t1, FS_DIRTY
+    csrc sstatus, t1
+    and a2, a2, t1
+    csrs sstatus, a2
+    ret
+.size pauli_fp_put, .-pauli_fp_put
+
+// a0 = *const FloatState (host_fp), a1 = usize (host_fs)
+.balign 4
+.global pauli_fp_restore_host
+.type pauli_fp_restore_host, @function
+pauli_fp_restore_host:
+    li t1, FS_DIRTY
+    csrs sstatus, t1
+    fp_restore a0, 0
+    li t1, FS_DIRTY
+    csrc sstatus, t1
+    and a1, a1, t1
+    csrs sstatus, a1
+    ret
+.size pauli_fp_restore_host, .-pauli_fp_restore_host
 .option pop

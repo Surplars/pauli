@@ -28,8 +28,9 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 if self.try_timer_peer(owner, local, &parked)? {
                     return Ok(First::Done(true));
                 }
-                let ran = self.run_group(0, owner, set, local.cursor % LANES, local, &parked)?
-                    || self.run_deferred(owner, local, &parked)?;
+                let sole = set.count() == 1;
+                let ran = self.run_group(0, owner, set, local.cursor % LANES, local, &parked, sole)?
+                    || self.run_deferred(owner, local, &parked, sole)?;
                 return Ok(First::Done(ran));
             }
             let cursor = if local.cursor / LANES < groups {
@@ -54,27 +55,29 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         };
         let first = cursor / LANES;
         let others = (first + 1..groups).chain(0..first);
+        let mut ready_lanes = head.count();
         for g in others.clone() {
-            masked::<A, _>(|| self.scan_mail(g, owner, local, &mut parked))?;
+            ready_lanes += masked::<A, _>(|| self.scan_mail(g, owner, local, &mut parked))?.count();
         }
+        let sole = ready_lanes == 1;
         if matches!(local.timer_turn, TimerTurn::Offered(_))
             && masked::<A, _>(|| self.try_timer_peer(owner, local, &parked))?
         {
             return Ok(true);
         }
         let tail = head.take_before(cursor % LANES);
-        if masked::<A, _>(|| self.run_group(first, owner, head, 0, local, &parked))? {
+        if masked::<A, _>(|| self.run_group(first, owner, head, 0, local, &parked, sole))? {
             return Ok(true);
         }
         for g in others {
             let set = self.manager.placed_on(g, owner);
-            if masked::<A, _>(|| self.run_group(g, owner, set, 0, local, &parked))? {
+            if masked::<A, _>(|| self.run_group(g, owner, set, 0, local, &parked, sole))? {
                 return Ok(true);
             }
         }
         masked::<A, _>(|| {
-            Ok(self.run_group(first, owner, tail, 0, local, &parked)?
-                || self.run_deferred(owner, local, &parked)?)
+            Ok(self.run_group(first, owner, tail, 0, local, &parked, sole)?
+                || self.run_deferred(owner, local, &parked, sole)?)
         })
     }
     /// If a regular turn surrendered the hart to a timed peer, offer that
@@ -100,6 +103,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 peer: parked.for_peer(lane).at,
                 sibling: parked.sibling,
             },
+            false,
         )
     }
     // An expedited lane has already run, even if it would also be next in
@@ -109,12 +113,13 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         owner: usize,
         local: &mut Dispatcher<A::Timer, R>,
         parked: &deadline::ParkedTimers,
+        sole: bool,
     ) -> Result<bool> {
         let TimerTurn::Served { lane, .. } = local.timer_turn else {
             return Ok(false);
         };
         local.timer_turn = TimerTurn::Normal;
-        if !self.run_exact(lane, owner, local, Visit::Regular(parked.for_peer(lane)))? {
+        if !self.run_exact(lane, owner, local, Visit::Regular(parked.for_peer(lane)), sole)? {
             return Ok(false);
         }
         local.cursor = lane + 1;
@@ -126,6 +131,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         owner: usize,
         local: &mut Dispatcher<A::Timer, R>,
         visit: Visit,
+        sole: bool,
     ) -> Result<bool> {
         let Some(vm) = self.manager.available(lane / STRIDE) else {
             return Ok(false);
@@ -136,7 +142,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         if !vm.lifecycle.can_enter() {
             return Ok(false);
         }
-        self.process(&vm, slot, local, visit)
+        self.process(&vm, slot, local, visit, sole)
     }
     fn run_group<R: Tracer>(
         &self,
@@ -146,6 +152,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         mut cursor: usize,
         local: &mut Dispatcher<A::Timer, R>,
         parked: &deadline::ParkedTimers,
+        sole: bool,
     ) -> Result<bool> {
         while let Some(flat) = set.pop_from(cursor) {
             cursor = (flat + 1) % LANES;
@@ -168,7 +175,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 continue;
             }
             let peer = parked.for_peer(lane);
-            if self.process(&vm, slot, local, Visit::Regular(peer))? {
+            if self.process(&vm, slot, local, Visit::Regular(peer), sole)? {
                 local.cursor = lane + 1;
                 return Ok(true);
             }
@@ -202,7 +209,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                     continue;
                 };
                 if state == State::Stopping || slot.mailbox.lock().pending() {
-                    self.process(&vm, slot, local, Visit::Mail)?;
+                    self.process(&vm, slot, local, Visit::Mail, false)?;
                 }
                 if state == State::Ready {
                     // Sample after mail: an IPI may already have woken this lane.

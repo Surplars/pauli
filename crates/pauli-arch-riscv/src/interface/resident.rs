@@ -12,13 +12,13 @@ impl Resident<VirtualCpu> for RiscvResident {
     unsafe fn new() -> Self {
         Self {
             bank: crate::resident::Resident::default(),
-            #[cfg(feature="aia-guest-file")]
+            #[cfg(feature = "aia-guest-file")]
             // SAFETY: this scoped owner is IRQ-masked until put/drop.
             file: unsafe { crate::aia::hardware::Cache::acquire() },
         }
     }
-    fn put(&mut self) {
-        self.bank.put();
+    fn put(&mut self, cpu: &mut VirtualCpu) {
+        self.bank.put(cpu.context_mut());
     }
     fn load_interrupts(&mut self, _cpu: &mut VirtualCpu, _chip: &mut RiscvIrqChip) -> Result<()> {
         #[cfg(feature = "aia-guest-file")]
@@ -34,14 +34,14 @@ impl Resident<VirtualCpu> for RiscvResident {
         }
         Ok(())
     }
-    fn put_interrupts(&mut self, _cpu: &mut VirtualCpu, _chip: &mut RiscvIrqChip) -> Result<()> {
-        self.bank.put();
+    fn put_interrupts(&mut self, cpu: &mut VirtualCpu, _chip: &mut RiscvIrqChip) -> Result<()> {
+        self.bank.put(cpu.context_mut());
         #[cfg(feature = "aia-guest-file")]
         if let (Some(file), RiscvIrqChip::Advanced(chip)) = (&mut self.file, _chip) {
             if file.bound() {
                 // SAFETY: guest exited, base bank put, same IRQ-masked owner and file.
-                let state = unsafe { file.put(_cpu) };
-                chip.put_file(_cpu.index() as usize, state);
+                let state = unsafe { file.put(cpu) };
+                chip.put_file(cpu.index() as usize, state);
             }
         }
         Ok(())

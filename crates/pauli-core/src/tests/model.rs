@@ -350,6 +350,24 @@ impl Fixture {
             pauli_config::MAX_DISKS],
         template: impl Fn(usize, &mut VmConfig) -> BootImages,
     ) -> Self {
+        let (board, allocations, spare) =
+            Self::test_board(host_cpus, guest_cpus, spare_mib, disks, template);
+        let board = Box::leak(Box::new(board));
+        Self {
+            runtime: VmRuntime::create(board, Box::leak(Box::new(crate::manager::VmStore::new())))
+                .unwrap(),
+            _backing: allocations,
+            _spare: spare,
+        }
+    }
+    pub(super) fn test_board(
+        host_cpus: usize,
+        guest_cpus: [u8; 2],
+        spare_mib: usize,
+        disks: [Option<(pauli_config::DiskConfig, &'static dyn HostBlockDevice)>;
+            pauli_config::MAX_DISKS],
+        template: impl Fn(usize, &mut VmConfig) -> BootImages,
+    ) -> (TestBoard, [Allocation; 2], Option<Allocation>) {
         NOW.with(|n| n.set(0));
         PENDING_KICKS.with(|k| k.set(0));
         #[cfg(feature = "selftest")]
@@ -401,7 +419,7 @@ impl Fixture {
             disks: disks.map(|entry| entry.map(|(config, _)| config)),
             vms,
         }));
-        let board = Box::leak(Box::new(TestBoard {
+        let board = TestBoard {
             info: BoardInfo {
                 ram_base: low - 4096,
                 ram_size: high - low + 4096,
@@ -418,13 +436,8 @@ impl Fixture {
             resources: SpinLock::new(resources),
             pool,
             disks: disks.map(|entry| entry.map(|(_, disk)| disk)),
-        }));
-        Self {
-            runtime: VmRuntime::create(board, Box::leak(Box::new(crate::manager::VmStore::new())))
-                .unwrap(),
-            _backing: allocations,
-            _spare: spare,
-        }
+        };
+        (board, allocations, spare)
     }
 }
 

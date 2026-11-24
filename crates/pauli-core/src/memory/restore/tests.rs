@@ -101,3 +101,43 @@ fn same_size_peer_with_identical_gpa_rejects_foreign_plan() {
     assert_eq!(left, [0x51; LEN]);
     assert_eq!(right, [0x72; LEN]);
 }
+
+#[test]
+fn aligned_and_unaligned_bulk_volatile_ops_match_byte_for_byte() {
+    let mut dst_buf = [0xaa_u8; 4128];
+    let mut src_buf = [0_u8; 4128];
+    for (i, byte) in src_buf.iter_mut().enumerate() {
+        *byte = (i as u8).wrapping_mul(31).wrapping_add(7);
+    }
+    let lengths: [usize; 14] = [0, 1, 2, 7, 8, 9, 15, 16, 31, 32, 33, 63, 64, 4096];
+    for dst_align in 0..8 {
+        for len in lengths {
+            let start = 8 + dst_align;
+            dst_buf.fill(0xaa);
+            // SAFETY: exclusive test buffer with 8-byte guards on both sides.
+            unsafe { zero_volatile(dst_buf.as_mut_ptr().add(start) as usize, len) };
+            assert!(dst_buf[..start].iter().all(|&b| b == 0xaa));
+            assert!(dst_buf[start..start + len].iter().all(|&b| b == 0));
+            assert!(dst_buf[start + len..].iter().all(|&b| b == 0xaa));
+
+            for src_align in 0..8 {
+                let s_start = 8 + src_align;
+                dst_buf.fill(0xaa);
+                // SAFETY: exclusive disjoint test buffers with guards on both sides.
+                unsafe {
+                    copy_volatile(
+                        dst_buf.as_mut_ptr().add(start) as usize,
+                        src_buf.as_ptr().add(s_start),
+                        len,
+                    );
+                }
+                assert!(dst_buf[..start].iter().all(|&b| b == 0xaa));
+                assert_eq!(
+                    &dst_buf[start..start + len],
+                    &src_buf[s_start..s_start + len]
+                );
+                assert!(dst_buf[start + len..].iter().all(|&b| b == 0xaa));
+            }
+        }
+    }
+}

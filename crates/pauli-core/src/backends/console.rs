@@ -59,6 +59,9 @@ impl Console {
     pub(crate) fn has_output(&self) -> bool {
         self.len != 0
     }
+    pub(crate) fn is_full(&self) -> bool {
+        self.len == CAPACITY
+    }
     pub(crate) fn needs_fast_idle_service(&self) -> bool {
         self.has_output() || self.uart.rx_timeout_armed()
     }

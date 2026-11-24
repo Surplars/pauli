@@ -76,6 +76,10 @@ impl<const WORDS: usize, const WIDTH: usize> SlotSet<WORDS, WIDTH> {
         self.0.iter().all(|&word| word == 0)
     }
 
+    pub(crate) fn count(&self) -> usize {
+        self.0.iter().map(|word| word.count_ones() as usize).sum()
+    }
+
     #[cfg(test)]
     pub(crate) fn insert(&mut self, vm: usize, cpu: u8) {
         let flat = vm * WIDTH + usize::from(cpu);

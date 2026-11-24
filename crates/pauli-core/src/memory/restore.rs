@@ -3,7 +3,6 @@
 //! Invariants: ordered zero/copy spans cover that exact assignment once, without DMA.
 use super::GuestRam;
 use crate::{HvError, Result};
-use core::intrinsics::{volatile_copy_nonoverlapping_memory, volatile_set_memory};
 use pauli_hal::mem::PhysRange;
 
 #[cfg(test)]
@@ -65,19 +64,110 @@ impl GuestRam {
             // No running guest/device is observing fields with a required access width.
             unsafe {
                 if gap != 0 {
-                    volatile_set_memory(cursor as *mut u8, 0, gap);
+                    zero_volatile(cursor, gap);
                     cursor += gap;
                 }
                 if !bytes.is_empty() {
-                    volatile_copy_nonoverlapping_memory(
-                        cursor as *mut u8,
-                        bytes.as_ptr(),
-                        bytes.len(),
-                    );
+                    copy_volatile(cursor, bytes.as_ptr(), bytes.len());
                     cursor += bytes.len();
                 }
             }
         }
         Ok(())
+    }
+}
+
+/// # Safety
+/// `[dst, dst + len)` must be retained, writable foreign RAM with no running
+/// guest, device DMA, or aliased Rust reference observing those bytes.
+unsafe fn zero_volatile(mut dst: usize, mut len: usize) {
+    while len != 0 && (dst & 7) != 0 {
+        // SAFETY: caller proved `[dst, dst + len)` is writable foreign RAM.
+        unsafe { (dst as *mut u8).write_volatile(0) };
+        dst += 1;
+        len -= 1;
+    }
+    while len >= 32 {
+        // SAFETY: `dst` is 8-byte aligned and at least 32 bytes remain.
+        unsafe {
+            let ptr = dst as *mut u64;
+            ptr.write_volatile(0);
+            ptr.add(1).write_volatile(0);
+            ptr.add(2).write_volatile(0);
+            ptr.add(3).write_volatile(0);
+        }
+        dst += 32;
+        len -= 32;
+    }
+    while len >= 8 {
+        // SAFETY: `dst` is 8-byte aligned and at least 8 bytes remain.
+        unsafe { (dst as *mut u64).write_volatile(0) };
+        dst += 8;
+        len -= 8;
+    }
+    while len != 0 {
+        // SAFETY: at least 1 byte remains in the checked destination span.
+        unsafe { (dst as *mut u8).write_volatile(0) };
+        dst += 1;
+        len -= 1;
+    }
+}
+
+/// # Safety
+/// `[dst, dst + len)` must be retained, writable foreign RAM disjoint from
+/// readable `[src, src + len)`.
+unsafe fn copy_volatile(mut dst: usize, mut src: *const u8, mut len: usize) {
+    while len != 0 && (dst & 7) != 0 {
+        // SAFETY: destination and source are in-bounds and disjoint.
+        unsafe {
+            (dst as *mut u8).write_volatile(src.read());
+            src = src.add(1);
+        }
+        dst += 1;
+        len -= 1;
+    }
+    if (src as usize) & 7 == 0 {
+        while len >= 32 {
+            // SAFETY: both `dst` and `src` are 8-byte aligned and 32 bytes remain.
+            unsafe {
+                let d = dst as *mut u64;
+                let s = src.cast::<u64>();
+                d.write_volatile(s.read());
+                d.add(1).write_volatile(s.add(1).read());
+                d.add(2).write_volatile(s.add(2).read());
+                d.add(3).write_volatile(s.add(3).read());
+                src = src.add(32);
+            }
+            dst += 32;
+            len -= 32;
+        }
+        while len >= 8 {
+            // SAFETY: both `dst` and `src` are 8-byte aligned and 8 bytes remain.
+            unsafe {
+                (dst as *mut u64).write_volatile(src.cast::<u64>().read());
+                src = src.add(8);
+            }
+            dst += 8;
+            len -= 8;
+        }
+    } else {
+        while len >= 8 {
+            // SAFETY: `dst` is 8-byte aligned and `src` has at least 8 readable bytes.
+            unsafe {
+                (dst as *mut u64).write_volatile(src.cast::<u64>().read_unaligned());
+                src = src.add(8);
+            }
+            dst += 8;
+            len -= 8;
+        }
+    }
+    while len != 0 {
+        // SAFETY: at least 1 byte remains in both destination and source.
+        unsafe {
+            (dst as *mut u8).write_volatile(src.read());
+            src = src.add(1);
+        }
+        dst += 1;
+        len -= 1;
     }
 }

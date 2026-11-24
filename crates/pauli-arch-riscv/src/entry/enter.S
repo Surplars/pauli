@@ -56,12 +56,14 @@ pauli_guest_enter:
     sd sp, CTX_HOST_SP(a0)
     // Save even when host FS is Off: dormant host bits must neither leak into
     // the guest nor be overwritten. FS and VS are independent HS access gates.
+    // Resident mode (a1 != 0) keeps guest F/D registers live across quick exits.
     li t1, FP_VECTOR_MASK
     csrc sstatus, t1
     ld t2, CTX_FP_ENABLED(a0)
     beqz t2, .Lfp_enter_done
     li t1, FS_DIRTY
     csrs sstatus, t1
+    bnez a1, .Lfp_enter_done
     fp_save sp, HOST_FP
     fp_restore a0, CTX_FP
 .Lfp_enter_done:

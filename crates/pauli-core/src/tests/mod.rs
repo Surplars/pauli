@@ -21,6 +21,7 @@ mod runtime;
 mod shape;
 mod storage;
 mod uart_capture;
+mod uncontended;
 mod volumes;
 mod wake_delivery;
 mod wide;

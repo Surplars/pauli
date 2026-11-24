@@ -30,6 +30,7 @@ pub struct QemuVirtBoard {
 impl Board for QemuVirtBoard {
     // Devices::initialize requires the native UART's IRQ route before boot.
     const IRQ_DRIVEN_CONSOLE: bool = true;
+    const UNCONTENDED_QUANTUM_US: Option<u64> = Some(20_000);
 
     fn info(&self) -> BoardInfo {
         self.info
