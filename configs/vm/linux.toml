@@ -1,0 +1,7 @@
+# Start manually with 'vm start linux --attach'. Supply Image and an initramfs.
+[[vm]]
+name = "linux"
+memory_mib = 96
+vcpus = 1
+disk = "none"
+bootargs = "console=ttyS0,115200 rdinit=/init"

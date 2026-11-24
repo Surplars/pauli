@@ -1,0 +1,25 @@
+# Host-side VM parameters, independent of kernel Kconfig.
+# From hypervisor/: cargo xtask run --vm configs/vm/dual.toml --kernel IMAGE --initrd INITRD
+# Bounded core acceptance: cargo xtask smoke --suite instances --kernel IMAGE
+# Omitted kernel/initramfs fields inherit the launcher defaults independently.
+# To override a source, provide both its path and SHA-256 (paths relative to this
+# TOML file). See docs/vm-config.md.
+
+[[vm]]
+name = "control"
+memory_mib = 80
+guest_base = 0x80000000
+quantum_us = 1000
+vcpus = 1
+autostart = false
+disk = "none"
+
+[[vm]]
+name = "worker"
+memory_mib = 128
+# Cross a 1 GiB G-stage boundary to exercise both lower page tables.
+guest_base = 0xbfe00000
+quantum_us = 3000
+vcpus = 1
+autostart = false
+disk = "none"

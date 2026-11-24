@@ -1,0 +1,11 @@
+[package]
+name = "pauli-linux-probe"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+pauli-config = { path = "../../crates/pauli-config" }
+pauli-hal = { path = "../../crates/pauli-hal" }
+[[bin]]
+name = "pauli-linux-probe"
+path = "src/main.rs"
+bench = false

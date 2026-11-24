@@ -1,0 +1,24 @@
+[workspace]
+members = [
+    "crates/pauli-config", "crates/pauli-control", "crates/pauli-devices", "crates/pauli-hal",
+    "crates/pauli-drivers/virtio-common", "crates/pauli-drivers/virtio-blk",
+    "crates/pauli-drivers/virtio-net", "crates/pauli-drivers/ns16550a", "crates/pauli-drivers/goldfish-rtc",
+    "crates/pauli-arch-riscv",
+    "crates/pauli-core",
+    "boards/qemu-virt-riscv", "boards/valence-wave8-ooo",
+    "xtask", "xtask/guest",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+panic = "abort"
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+debug = 0
+incremental = false

@@ -1,0 +1,14 @@
+# Software guest APLIC/IMSIC; select config/targets/qemu-hv-aia.config as host.
+[[vm]]
+name = "smp"
+memory_mib = 96
+vcpus = 2
+interrupts = "aia"
+disk = "none"
+
+[[vm]]
+name = "peer"
+memory_mib = 96
+vcpus = 2
+interrupts = "aia"
+disk = "none"

@@ -1,0 +1,7 @@
+[package]
+name = "pauli-config"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+bench = false

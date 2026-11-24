@@ -1,0 +1,7 @@
+[package]
+name = "pauli-hal"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+bench = false

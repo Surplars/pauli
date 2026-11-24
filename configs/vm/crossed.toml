@@ -1,0 +1,14 @@
+# Two physical owners, two VMs, reversed vCPU placement. Both VMs span both
+# owners, so simultaneous SBI waiters must drain the OTHER VM's local queue.
+# Use --host-cpus 2. Run the SMP smoke separately to validate the local kernel.
+[[vm]]
+name = "left"
+vcpus = 2
+cpu_affinity = [0, 1]
+disk = "none"
+
+[[vm]]
+name = "right"
+vcpus = 2
+cpu_affinity = [1, 0]
+disk = "none"

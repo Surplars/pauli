@@ -1,0 +1,9 @@
+# One full Debian userland. Supply its installed Image/initrd and dedicated
+# raw root disk explicitly. Adjust root= if your disk layout differs.
+[[vm]]
+name = "debian"
+memory_mib = 256
+vcpus = 2
+quantum_us = 2000
+disk = "rw"
+bootargs = "console=ttyS0,115200 root=/dev/vda1 ro rootwait"

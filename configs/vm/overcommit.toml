@@ -1,0 +1,15 @@
+# Four virtual harts share two physical owners; all local siblings must
+# service each other's fence/HSM requests even while one is synchronously waiting.
+[[vm]]
+name = "smp"
+memory_mib = 96
+quantum_us = 2000
+vcpus = 4
+disk = "none"
+
+[[vm]]
+name = "peer"
+memory_mib = 96
+quantum_us = 2000
+vcpus = 2
+disk = "none"

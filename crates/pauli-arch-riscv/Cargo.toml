@@ -1,0 +1,18 @@
+[package]
+name = "pauli-arch-riscv"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+pauli-hal = { path = "../pauli-hal" }
+pauli-config = { path = "../pauli-config" }
+pauli-core = { path = "../pauli-core" }
+[dev-dependencies]
+pauli-devices = { path = "../pauli-devices" }
+[features]
+default = []
+aia = []
+aia-guest-file = ["aia"]
+guest-control = ["pauli-core/guest-control"]
+selftest = ["pauli-core/selftest"]
+[lib]
+bench = false

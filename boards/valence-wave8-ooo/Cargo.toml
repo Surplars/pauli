@@ -1,0 +1,19 @@
+[package]
+name = "valence-wave8-ooo"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+pauli-core = { path = "../../crates/pauli-core" }
+pauli-hal = { path = "../../crates/pauli-hal" }
+pauli-config = { path = "../../crates/pauli-config" }
+pauli-arch-riscv = { path = "../../crates/pauli-arch-riscv" }
+pauli-ns16550a = { path = "../../crates/pauli-drivers/ns16550a" }
+[features]
+default = ["aia", "guest-control"]
+aia = ["pauli-arch-riscv/aia"]
+guest-control = ["pauli-arch-riscv/guest-control"]
+selftest = ["pauli-arch-riscv/selftest"]
+[[bin]]
+name = "valence-wave8-ooo"
+path = "src/main.rs"
+bench = false

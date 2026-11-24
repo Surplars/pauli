@@ -1,0 +1,15 @@
+# Two SMP Linux guests share two or four physical owner harts.
+# cargo xtask run --vm configs/vm/dual-smp.toml --host-cpus 2 --kernel IMAGE --initrd INITRD
+[[vm]]
+name = "smp"
+memory_mib = 96
+quantum_us = 2000
+vcpus = 2
+disk = "none"
+
+[[vm]]
+name = "peer"
+memory_mib = 96
+quantum_us = 2000
+vcpus = 2
+disk = "none"

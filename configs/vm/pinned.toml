@@ -1,0 +1,18 @@
+# Two physical harts are required (--host-cpus 2). Keep both virtual harts of
+# smp on physical hart 1, and peer on hart 0. Repeated IDs mean time sharing,
+# not fictitious parallelism or exclusive reservation of that physical hart.
+[[vm]]
+name = "smp"
+memory_mib = 96
+quantum_us = 2000
+vcpus = 2
+cpu_affinity = [1, 1]
+disk = "none"
+
+[[vm]]
+name = "peer"
+memory_mib = 96
+quantum_us = 2000
+vcpus = 1
+cpu_affinity = [0]
+disk = "none"

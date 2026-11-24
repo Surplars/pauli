@@ -1,0 +1,8 @@
+[package]
+name = "pauli-virtio-common"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+pauli-hal = { path = "../../pauli-hal" }
+[lib]
+bench = false

@@ -1,0 +1,16 @@
+# Optional, isolated Ethernet pair. Use --host-cpus 2 with a Linux kernel that
+# includes CONFIG_VIRTIO_NET and suitable networking tools in its rootfs.
+# No host NIC, TAP, switch, gateway or external connectivity is created.
+[[vm]]
+name = "linux"
+vcpus = 2
+cpu_affinity = [0, 1]
+net_peer = "linux2"
+disk = "none"
+
+[[vm]]
+name = "linux2"
+vcpus = 2
+cpu_affinity = [1, 0]
+net_peer = "linux"
+disk = "none"

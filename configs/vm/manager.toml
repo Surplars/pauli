@@ -1,0 +1,16 @@
+# Diskless bring-up. CLI defaults are SHARED: supply only a public test initramfs.
+# A private management initramfs belongs in this first entry with its own SHA-256.
+[[vm]]
+name = "manager"
+memory_mib = 128
+vcpus = 2
+autostart = true
+bootargs = "console=ttyS0,115200 rdinit=/init"
+
+# An immutable, stopped template. Names and autostart do not confer any authority.
+[[vm]]
+name = "linux"
+memory_mib = 64
+vcpus = 1
+autostart = false
+bootargs = "console=ttyS0,115200 rdinit=/init"

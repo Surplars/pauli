@@ -1,0 +1,202 @@
+//! Description of the RV64 Linux virtual board, shared by staging and provisioning.
+//! Ownership/Lock Ordering: render into private host storage; no live guest or locks.
+//! Invariants: CPU nodes, interrupts, memory and initrd all describe the same VmConfig.
+use crate::{Error, GuestBoardLayout, MAX_GUEST_VCPUS, MmioRegion, VmConfig};
+mod writer;
+use writer::{Hex, Writer};
+type Result<T = ()> = core::result::Result<T, Error>;
+const CPU_INTC: u32 = 0x10;
+const CONTROLLER: u32 = 1;
+const MSI: u32 = 2;
+const EXTERNAL: u32 = 9;
+const LEVEL_HIGH: u32 = 4;
+
+/// Write the canonical tree, with no host addresses. Truncated output on error
+/// is never a DTB; only the returned prefix may be staged or used for restore.
+pub fn riscv(
+    vm: &VmConfig,
+    layout: GuestBoardLayout,
+    hz: u32,
+    args: &str,
+    out: &mut [u8],
+) -> Result<usize> {
+    vm.validate_guest_geometry()?;
+    if !layout.admits_ram(vm.guest_base, vm.memory_size) {
+        return Err(Error::Memory);
+    }
+    if !(1..=MAX_GUEST_VCPUS).contains(&vm.vcpus) || hz == 0 || args.as_bytes().contains(&0) {
+        return Err(Error::Dtb);
+    }
+    let mut f = Writer::new(out)?;
+    f.begin(&[])?;
+    f.text(
+        "compatible",
+        if vm.firmware.is_some() {
+            "openion,firmware-guest"
+        } else {
+            "openion,linux-guest"
+        },
+    )?;
+    f.text("model", "OpenIon isolated RV64 guest")?;
+    f.u32("#address-cells", 2)?;
+    f.u32("#size-cells", 2)?;
+    f.begin(&[b"chosen"])?;
+    f.text("bootargs", args)?;
+    f.prop(
+        "stdout-path",
+        &[b"/uart@", Hex::new(layout.uart.base).bytes(), &[0]],
+    )?;
+    if vm.image.initrd_size != 0 {
+        let start = vm.guest_base + vm.initrd_offset();
+        f.u64("linux,initrd-start", start)?;
+        f.u64("linux,initrd-end", start + vm.image.initrd_size)?;
+    }
+    f.end()?;
+    f.at(b"memory", vm.guest_base)?;
+    f.text("device_type", "memory")?;
+    f.reg(MmioRegion {
+        base: vm.guest_base,
+        size: vm.memory_size,
+    })?;
+    f.end()?;
+    cpus(&mut f, vm, hz)?;
+    interrupts(&mut f, vm, layout)?;
+    device(
+        &mut f,
+        b"uart",
+        "ns16550a",
+        layout.uart,
+        layout.uart_irq,
+        vm.aia,
+    )?;
+    f.u32("clock-frequency", 3_686_400)?;
+    f.u32("current-speed", 115_200)?;
+    f.end()?;
+    device(
+        &mut f,
+        b"rtc",
+        "google,goldfish-rtc",
+        layout.rtc,
+        layout.rtc_irq,
+        vm.aia,
+    )?;
+    f.end()?;
+    if vm.disk.is_some() {
+        virtio(&mut f, layout.block, layout.block_irq, vm.aia)?;
+    }
+    if vm.net_peer.is_some() || vm.net_uplink {
+        virtio(&mut f, layout.net, layout.net_irq, vm.aia)?;
+    }
+    f.end()?;
+    f.finish()
+}
+fn cpus(f: &mut Writer<'_>, vm: &VmConfig, hz: u32) -> Result {
+    f.begin(&[b"cpus"])?;
+    f.u32("#address-cells", 1)?;
+    f.u32("#size-cells", 0)?;
+    f.u32("timebase-frequency", hz)?;
+    for cpu in 0..u32::from(vm.vcpus) {
+        f.at(b"cpu", u64::from(cpu))?;
+        f.text("device_type", "cpu")?;
+        f.text("compatible", "riscv")?;
+        f.text("enable-method", "riscv,sbi")?;
+        f.text("status", "okay")?;
+        f.u32("reg", cpu)?;
+        f.text("mmu-type", "riscv,sv39")?;
+        f.text("riscv,isa-base", "rv64i")?;
+        let extra: &[u8] = if vm.aia { b"ssaia\0" } else { &[] };
+        let integer = vm.firmware.is_some();
+        let fp: &[u8] = if integer { b"" } else { b"f\0d\0" };
+        f.prop(
+            "riscv,isa-extensions",
+            &[b"i\0m\0a\0", fp, b"c\0zicsr\0zifencei\0zicntr\0", extra],
+        )?;
+        f.text(
+            "riscv,isa",
+            match (integer, vm.aia) {
+                (true, false) => "rv64imac_zicsr_zifencei_zicntr",
+                (true, true) => "rv64imac_zicsr_zifencei_zicntr_ssaia",
+                (false, false) => "rv64imafdc_zicsr_zifencei_zicntr",
+                (false, true) => "rv64imafdc_zicsr_zifencei_zicntr_ssaia",
+            },
+        )?;
+        f.begin(&[b"interrupt-controller"])?;
+        f.text("compatible", "riscv,cpu-intc")?;
+        f.u32("#interrupt-cells", 1)?;
+        f.u32("phandle", CPU_INTC + cpu)?;
+        f.prop("interrupt-controller", &[])?;
+        f.end()?;
+        f.end()?;
+    }
+    f.end()
+}
+fn interrupts(f: &mut Writer<'_>, vm: &VmConfig, layout: GuestBoardLayout) -> Result {
+    let (name, compatible, region): (&[u8], _, _) = if vm.aia {
+        (b"aplic", "riscv,aplic", layout.aplic)
+    } else {
+        (
+            b"plic",
+            "riscv,plic0",
+            layout.plic_contexts(vm.vcpus).ok_or(Error::Dtb)?,
+        )
+    };
+    let mut entries = [0; 8 * MAX_GUEST_VCPUS as usize];
+    let contexts = &mut entries[..8 * usize::from(vm.vcpus)];
+    for (cpu, pair) in contexts.chunks_exact_mut(8).enumerate() {
+        pair[..4].copy_from_slice(&(CPU_INTC + cpu as u32).to_be_bytes());
+        pair[4..].copy_from_slice(&EXTERNAL.to_be_bytes());
+    }
+    f.at(name, region.base)?;
+    f.text("compatible", compatible)?;
+    f.reg(region)?;
+    f.u32("phandle", CONTROLLER)?;
+    f.prop("interrupt-controller", &[])?;
+    f.u32("#address-cells", 0)?;
+    f.u32("#interrupt-cells", if vm.aia { 2 } else { 1 })?;
+    if !vm.aia {
+        f.u32("riscv,ndev", 31)?;
+        f.prop("interrupts-extended", &[contexts])?;
+        return f.end();
+    }
+    f.u32("riscv,num-sources", 31)?;
+    f.u32("msi-parent", MSI)?;
+    f.end()?;
+    let files = layout.imsic_files(vm.vcpus).ok_or(Error::Dtb)?;
+    f.at(b"imsics", files.base)?;
+    f.text("compatible", "riscv,imsics")?;
+    f.reg(files)?;
+    f.u32("#interrupt-cells", 0)?;
+    f.u32("#msi-cells", 0)?;
+    f.prop("interrupt-controller", &[])?;
+    f.prop("msi-controller", &[])?;
+    f.u32("phandle", MSI)?;
+    f.u32("riscv,num-ids", 255)?;
+    f.prop("interrupts-extended", &[contexts])?;
+    f.end()
+}
+fn device(
+    f: &mut Writer<'_>,
+    name: &[u8],
+    compatible: &str,
+    region: MmioRegion,
+    irq: u32,
+    aia: bool,
+) -> Result {
+    f.at(name, region.base)?;
+    f.text("compatible", compatible)?;
+    f.reg(region)?;
+    f.u32("interrupt-parent", CONTROLLER)?;
+    if aia {
+        f.prop(
+            "interrupts",
+            &[&irq.to_be_bytes(), &LEVEL_HIGH.to_be_bytes()],
+        )
+    } else {
+        f.u32("interrupts", irq)
+    }
+}
+fn virtio(f: &mut Writer<'_>, region: MmioRegion, irq: u32, aia: bool) -> Result {
+    device(f, b"virtio", "virtio,mmio", region, irq, aia)?;
+    f.prop("dma-coherent", &[])?;
+    f.end()
+}

@@ -1,0 +1,109 @@
+//! Authorized management adapter; only the management owner invokes mutations.
+//! Ownership/Lock Ordering: no service/queue lock spans lifecycle or device operations.
+//! Invariants: stable public VM IDs are slot+1; replies expose no host memory pointers.
+use crate::{
+    HvError,
+    arch::{ArchTimer, HvArch},
+    board::Board,
+    runtime::VmRuntime,
+    vm::{State, Vm},
+};
+use pauli_control::{Backend, ChildSpec, Error, Info, VmId};
+pub struct Target<'a, A: HvArch, B: Board>(pub &'a VmRuntime<A, B>);
+impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
+    fn grant_page(&self) -> Result<&'static mut pauli_control::GrantPage, Error> {
+        let pool = self.0.board.domain_pool().ok_or(Error::NoSpace)?;
+        let page = pool
+            .metadata(1, pauli_control::GrantPage::new)
+            .map_err(resource_error)?;
+        Ok(&mut page[0])
+    }
+    fn snapshot(&self) -> impl Iterator<Item = Info> + '_ {
+        self.0.manager.vms().map(|vm| info(&vm))
+    }
+    fn info(&self, vm: VmId) -> core::result::Result<Info, Error> {
+        let index = vm.0.checked_sub(1).ok_or(Error::NotFound)? as usize;
+        let vm = self.0.manager.vm(index).map_err(|_| Error::NotFound)?;
+        Ok(info(&vm))
+    }
+    fn start(&mut self, vm: VmId) -> core::result::Result<bool, Error> {
+        if self.info(vm)?.active {
+            return Ok(false);
+        }
+        self.0
+            .manager
+            .start(self.0.board, vm.0 as usize - 1)
+            .map_err(resource_error)?;
+        Ok(true)
+    }
+    fn stop(&mut self, vm: VmId) -> core::result::Result<(), Error> {
+        let vm = self
+            .0
+            .manager
+            .vm(vm.0.checked_sub(1).ok_or(Error::NotFound)? as usize)
+            .map_err(|_| Error::NotFound)?;
+        vm.host_stop();
+        Ok(())
+    }
+    fn create(
+        &mut self,
+        sponsor: Option<VmId>,
+        template: VmId,
+        spec: ChildSpec,
+    ) -> core::result::Result<Info, Error> {
+        let slot = template.0.checked_sub(1).ok_or(Error::NotFound)? as usize;
+        let child = self
+            .0
+            .manager
+            .provision(self.0.board, sponsor, slot, spec)
+            .map_err(resource_error)?;
+        self.info(VmId(child as u32 + 1))
+    }
+    fn destroy(&mut self, vm: VmId, epoch: u32) -> core::result::Result<(), Error> {
+        let slot = vm.0.checked_sub(1).ok_or(Error::NotFound)? as usize;
+        self.0.manager.destroy(slot, epoch).map_err(resource_error)
+    }
+    fn input(&mut self, vm: VmId, byte: u8) -> core::result::Result<(), Error> {
+        let vm = self
+            .0
+            .manager
+            .vm(vm.0.checked_sub(1).ok_or(Error::NotFound)? as usize)
+            .map_err(|_| Error::NotFound)?;
+        let accepted = vm.devices.receive_console(byte, A::Timer::now);
+        // The line is already visible. Wake its owner(s) after dropping the
+        // device locks, including when a full FIFO raised an overrun interrupt.
+        vm.deliver_wakes();
+        if accepted {
+            Ok(())
+        } else {
+            Err(Error::Backend("guest RX FIFO full"))
+        }
+    }
+}
+fn info<A: HvArch>(vm: &Vm<A>) -> Info {
+    let state = vm.lifecycle.state();
+    Info {
+        vm: VmId(vm.slot as u32 + 1),
+        epoch: vm.epoch(),
+        state: match state {
+            State::Ready => pauli_control::State::Running,
+            State::Stopping => pauli_control::State::Stopping,
+            State::Stopped => pauli_control::State::Stopped,
+            State::Faulted => pauli_control::State::Faulted,
+        },
+        active: state == State::Ready,
+        vcpus: vm.config.vcpus,
+        memory_bytes: vm.config.memory_size,
+    }
+}
+fn resource_error(error: HvError) -> Error {
+    match error {
+        HvError::Busy => Error::Busy,
+        HvError::Exhausted => Error::NoSpace,
+        HvError::NotFound => Error::NotFound,
+        HvError::Permission => Error::Denied,
+        HvError::Unsupported => Error::Unsupported,
+        HvError::InvalidConfig | HvError::InvalidImage => Error::Invalid,
+        _ => Error::Backend("VM resource transaction failed"),
+    }
+}

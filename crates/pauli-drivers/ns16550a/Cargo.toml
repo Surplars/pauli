@@ -1,0 +1,8 @@
+[package]
+name = "pauli-ns16550a"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+pauli-hal = { path = "../../pauli-hal" }
+[lib]
+bench = false

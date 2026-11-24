@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+// Append to the native Wave8 OoO tree; this is not the Linux guest's tree.
+&{/chosen} {
+    // The ordinary guest is also the default when the role is absent.
+    openion,guest-role = "guest";
+    // Native source address, exact uncompressed Image file size (NOT runtime size).
+    // Size below is for the wave8-cmu-20261123-r1 Image; update it for other builds.
+    openion,guest-image = /bits/ 64 <0x89000000 0x006f2008>;
+    openion,guest-bootargs = "console=ttyS0,115200n8 rdinit=/init valence.init=busybox";
+    // Keep the original native linux,initrd-start/end for this release's archive.
+};
+
+&{/reserved-memory} {
+    guest-ram@a0000000 {
+        compatible = "openion,wave8-guest-ram";
+        // Two address cells, two size cells: one exclusive 512 MiB HPA loan.
+        reg = <0x0 0xa0000000 0x0 0x20000000>;
+        no-map;
+    };
+};

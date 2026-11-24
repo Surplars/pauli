@@ -1,0 +1,16 @@
+# Two virtual CPUs in one Linux plus an isolated single-vCPU peer.
+# Guest SMP runs on the serialized one-physical-hart backend first.
+# cargo xtask run --vm configs/vm/smp.toml --host-cpus 1 --kernel IMAGE --initrd INITRD
+[[vm]]
+name = "smp"
+memory_mib = 96
+quantum_us = 2000
+vcpus = 2
+disk = "none"
+
+[[vm]]
+name = "peer"
+memory_mib = 96
+quantum_us = 2000
+vcpus = 1
+disk = "none"

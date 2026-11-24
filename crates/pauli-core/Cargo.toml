@@ -1,0 +1,16 @@
+[package]
+name = "pauli-core"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+pauli-hal = { path = "../pauli-hal" }
+pauli-config = { path = "../pauli-config" }
+pauli-control = { path = "../pauli-control" }
+pauli-devices = { path = "../pauli-devices" }
+[features]
+default = []
+guest-control = []
+selftest = []
+trace = []
+[lib]
+bench = false

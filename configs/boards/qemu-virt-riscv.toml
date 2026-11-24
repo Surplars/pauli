@@ -1,0 +1,8 @@
+# QEMU virt OpenSBI payload and default guest timebase contract.
+target = "riscv64imac-unknown-none-elf"
+ram_base = 0x80000000
+payload_entry = 0x80200000
+payload_limit = 0x00600000
+timebase_hz = 10000000
+max_cpus = 64
+qemu = true

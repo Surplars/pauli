@@ -1,0 +1,10 @@
+[package]
+name = "pauli-devices"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+bench = false
+
+[features]
+acceptance = []

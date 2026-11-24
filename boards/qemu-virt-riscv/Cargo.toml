@@ -1,0 +1,25 @@
+[package]
+name = "qemu-virt-riscv"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+pauli-core = { path = "../../crates/pauli-core" }
+pauli-hal = { path = "../../crates/pauli-hal" }
+pauli-config = { path = "../../crates/pauli-config" }
+pauli-arch-riscv = { path = "../../crates/pauli-arch-riscv" }
+pauli-ns16550a = { path = "../../crates/pauli-drivers/ns16550a" }
+pauli-goldfish-rtc = { path = "../../crates/pauli-drivers/goldfish-rtc" }
+pauli-virtio-blk = { path = "../../crates/pauli-drivers/virtio-blk" }
+pauli-virtio-net = { path = "../../crates/pauli-drivers/virtio-net" }
+pauli-virtio-common = { path = "../../crates/pauli-drivers/virtio-common" }
+[features]
+default = []
+aia = ["pauli-arch-riscv/aia"]
+aia-guest-file = ["aia", "pauli-arch-riscv/aia-guest-file"]
+guest-control = ["pauli-arch-riscv/guest-control", "pauli-core/guest-control"]
+selftest = ["pauli-arch-riscv/selftest", "pauli-core/selftest"]
+[[bin]]
+name = "qemu-virt-riscv"
+path = "src/main.rs"
+test = false
+bench = false

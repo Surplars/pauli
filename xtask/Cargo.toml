@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+anyhow = "=1.0.102"
+toml = "=1.1.2"
+sha2 = "=0.10.9"
+pauli-config = { path = "../crates/pauli-config" }
+pauli-devices = { path = "../crates/pauli-devices" }
+[dev-dependencies]
+pauli-hal = { path = "../crates/pauli-hal" }

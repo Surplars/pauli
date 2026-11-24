@@ -1,0 +1,7 @@
+[package]
+name = "pauli-control"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+bench = false

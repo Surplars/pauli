@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rust-src
+          targets: riscv64imac-unknown-none-elf
+      - name: Run host unit tests
+        run: cargo xtask test
+      - name: Build qemu-virt-riscv board matrix
+        run: |
+          cargo xtask build --board qemu-virt-riscv
+          cargo xtask build --board qemu-virt-riscv --features aia,aia-guest-file
+          cargo xtask build --board qemu-virt-riscv --features guest-control
+          cargo xtask build --board qemu-virt-riscv --features selftest
+      - name: Build valence-wave8-ooo board matrix
+        run: |
+          cargo xtask build --board valence-wave8-ooo
+          cargo xtask build --board valence-wave8-ooo --features selftest
+      - name: Run Linux tool host tests
+        run: make -C integrations/linux/tool test
+      - name: Run Python tooling unit tests
+        run: python3 -m unittest discover -s tools -p "test_*.py"

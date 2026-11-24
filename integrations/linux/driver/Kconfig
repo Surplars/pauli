@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config PAULI_HV
+	tristate "Pauli guest VM management bridge"
+	depends on RISCV && 64BIT && RISCV_SBI
+	help
+	  Expose the Pauli SBI management interface via /dev/pauli.
+	  Requests are limited by both Linux credentials and hypervisor grants.
+	  No device is registered on systems without the version 1 interface.
