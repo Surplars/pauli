@@ -27,7 +27,9 @@ jobs:
         run: |
           cargo xtask build --board valence
           cargo xtask build --board valence --features selftest
-      - name: Run Linux tool host tests
-        run: make -C integrations/linux/tool test
+      - name: Run Linux tool and driver host tests
+        run: |
+          make -C integrations/linux/tool test
+          make -C integrations/linux/driver test
       - name: Run Python tooling unit tests
         run: python3 -m unittest discover -s tools -p "test_*.py"

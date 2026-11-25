@@ -28,7 +28,8 @@ def main():
     }
     # Explicit source inputs: local build outputs must not leak into a release.
     for name in ("README.md", "driver/README.md", "driver/pauli.c", "driver/Makefile",
-                 "driver/Kconfig", "driver/build-image-module.sh", "include/uapi/linux/pauli.h",
+                 "driver/Kconfig", "driver/build-image-module.sh", "driver/test-pauli.c",
+                 "include/uapi/linux/pauli.h",
                  "tool/paulictl.c", "tool/test-paulictl.c", "tool/Makefile"):
         files["source/" + name] = (source / name, 0o755 if name.endswith(".sh") else 0o644)
 

@@ -51,8 +51,55 @@ accessible VMs. `service` is shorthand for public ID 2 on this board;
 numeric IDs also work. Stop is asynchronous: if status is `stopping`, query
 again until `stopped`. The service runs on its own virtual console; its
 output is not mixed into the Linux shell. Confirm status, not a UART banner.
-Each mutation uses the epoch obtained by a preceding inspect. A stale or
-busy error is returned without retrying against an unknown incarnation.
+Use `paulictl stop service --wait` to wait for a terminal state in the same command.
+
+## Commands
+
+```text
+paulictl info
+paulictl list
+paulictl status ID
+paulictl start ID [--epoch E]
+paulictl stop ID [--epoch E] [--wait [--timeout-ms MS]]
+paulictl memory ID [--epoch E]
+paulictl create TEMPLATE NAME [--epoch E] [--vcpus N] [--memory-mib M] [--disk SLOT]
+paulictl destroy ID [--epoch E]
+```
+
+Use a positive decimal public ID or `service` (2) for ID and TEMPLATE.
+`list` prints the same rows as `status`, in ascending ID order. It skips IDs
+for which INSPECT returns access denied or invalid target and reports other
+errors. The rows are successive observations and may change during a scan.
+`memory` uses the inspect grant and reports the exact byte count.
+
+`create` requires a template grant and quota. The name is 1–16 ASCII bytes,
+starting with a letter and continuing with letters, digits, underscores or
+hyphens. The CLI accepts 1–255 vCPUs and 1–65,535 MiB. Omit either option
+to inherit that template field. A shape override requires the shape grant. Children default to
+diskless. `--disk 0` through `--disk 3` select a separately granted logical
+volume. The create reply identifies the new child and its initial epoch.
+`destroy` returns the child's last status on successful retirement.
+
+Commands that take `--epoch` first inspect the target when the option is
+omitted. With an explicit nonzero epoch they submit the request directly.
+For create, supply the template epoch. For subsequent child operations, use
+the latest child epoch. A stale epoch, busy result or copy error ends the
+request. Inspect the target before deciding whether to issue another action.
+
+`stop --wait` issues STOP once and polls INSPECT for the same epoch until
+the state is `stopped` or `faulted`. The successful row shows the observed
+state and the original STOP reply's `changed` bit. An epoch change or timeout
+ends the wait with an error. The default timeout is 30,000 ms. A timeout
+does not cancel the acknowledged stop.
+
+Run the tool and driver tests on a 64-bit Linux host:
+
+```sh
+make -C tool test
+make -C driver test
+```
+
+## Troubleshooting
 
 An ordinary guest may discover the ABI, but cannot control a peer.
 Missing device: check that the driver was built/loaded, devtmpfs is mounted,

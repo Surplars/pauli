@@ -50,9 +50,16 @@ hv> vm quota manager 3 6 384
 hv> vm grant manager linux inspect,create,shape
 ```
 
-The quota is a ceiling, not reserved RAM. Use the returned child ID and
-epoch for start/stop/destroy. A successful stop
-is a request, not proof of joined I/O; inspect and handle a busy destroy.
+In the manager guest, `paulictl list` shows the IDs it can inspect.
+`paulictl create 2 worker --memory-mib 64` reports the child's ID and
+initial epoch. Use that pair with `paulictl memory ID --epoch E` to read
+its exact size in bytes, or with `paulictl start ID --epoch E` to boot it.
+Use the epoch returned by start for `paulictl stop ID --epoch E --wait`.
+After a terminal status, `paulictl destroy ID --epoch E` requests
+retirement. If the backend is still busy, inspect again before deciding
+whether to submit another destroy. The quota sets a ceiling on allocation.
+For a disk-backed child the host must also grant the selected logical
+slot before the manager passes `--disk 0` through `--disk 3` to create.
 Cold-restarting the manager invalidates its grants. A native shutdown rejects
 queued guest creates/starts too. The hypervisor continues to own CPU, memory,
 interrupts and final retirement. See [the scalar ABI and permissions](vm-config.md).

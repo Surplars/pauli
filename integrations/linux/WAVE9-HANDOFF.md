@@ -34,8 +34,10 @@ insmod "/lib/modules/$(uname -r)/extra/pauli.ko"  # not needed with built-in dri
 ```
 
 Install kmod or enable the BusyBox insmod applet for a module-based image.
-Start/stop target the last observed incarnation. Stop acknowledgement can
-precede retirement; query until stopped. Booting the ordinary guest profile
+Start and stop inspect the current epoch unless you supply `--epoch E`.
+Use `paulictl stop service --wait` to wait for a terminal status. The
+packaged tool also supports listing, exact memory queries and child
+provisioning when the manager has the corresponding grants and quota. Booting the ordinary guest profile
 should still give Linux login but never peer control rights. For the new
 kernel build use `source/README.md` and `source/driver/README.md`; keep the
 existing Valence board patches/config when updating its upstream base.
