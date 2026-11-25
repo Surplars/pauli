@@ -111,6 +111,8 @@ pub struct VmConfig {
     /// Explicit arrays retain logical native owner indices. Workers excludes the actual
     /// boot/management hart. Unused array entries must remain zero.
     pub cpu_affinity: CpuAffinity,
+    /// Reserve the distinct, explicitly pinned owners for this VM at boot.
+    pub exclusive_cpus: bool,
     pub image: VmImage,
     pub firmware: Option<FirmwareLayout>,
 }

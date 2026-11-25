@@ -44,6 +44,7 @@ pub struct VmManager<A: HvArch> {
     // atomically probing each unoccupied backing slot on every slice.
     slots: [Option<&'static Vm<A>>; BOOT_SLOTS],
     boot_count: usize,
+    exclusive_owners: u64,
     index: Directory<Vm<A>>,
     links: &'static DeviceLinks,
     pub config: &'static BootConfig,
@@ -53,11 +54,24 @@ pub struct VmManager<A: HvArch> {
 impl<A: HvArch> VmManager<A> {
     pub(crate) fn create<B: Board>(board: &'static B, store: &'static VmStore<A>) -> Result<Self> {
         let config = board.load_boot_config()?;
-        match board.payload() {
-            Payload::Embedded => crate::vm::validate_embedded(config)?,
-            _ => config.validate().map_err(|_| HvError::InvalidConfig)?,
-        }
-        validate_info(board.info())?;
+        let info = board.info();
+        validate_info(info)?;
+        let exclusive_owners = match board.payload() {
+            Payload::Embedded => {
+                crate::vm::validate_embedded(config)?;
+                for vm in config.vms.iter().flatten() {
+                    vm.validate_placement_excluding(info.boot_cpu, info.host_cpus, 0)
+                        .map_err(|_| HvError::InvalidConfig)?;
+                }
+                0
+            }
+            _ => {
+                config.validate().map_err(|_| HvError::InvalidConfig)?;
+                config
+                    .exclusive_owner_mask(info.boot_cpu, info.host_cpus)
+                    .map_err(|_| HvError::InvalidConfig)?
+            }
+        };
         let boot_count = config.count(); // Validated records form a contiguous prefix.
         // A manifest can contain Linux or fixed-layout firmware. The smallest
         // eligible child bounds the ID space, not the number of boot entries.
@@ -85,7 +99,7 @@ impl<A: HvArch> VmManager<A> {
         }
         let index = Directory::new(
             &store.first,
-            &store.boot_lanes[..board.info().host_cpus],
+            &store.boot_lanes[..info.host_cpus],
             pool,
             capacity,
         )?;
@@ -100,6 +114,7 @@ impl<A: HvArch> VmManager<A> {
                 config,
                 *vm,
                 slot,
+                exclusive_owners,
                 slot as u32 + 1,
                 &store.links,
                 A::Timer::now(),
@@ -116,6 +131,7 @@ impl<A: HvArch> VmManager<A> {
         Ok(Self {
             slots,
             boot_count,
+            exclusive_owners,
             index,
             links: &store.links,
             config,
@@ -126,6 +142,9 @@ impl<A: HvArch> VmManager<A> {
     /// Highest addressable guest ID, not a promise that every requested shape fits.
     pub fn capacity(&self) -> usize {
         self.index.limit()
+    }
+    pub(crate) fn exclusive_owners(&self) -> u64 {
+        self.exclusive_owners
     }
     pub(crate) fn vms(&self) -> impl Iterator<Item = View<'_, Vm<A>>> {
         self.index.live().filter_map(|slot| self.available(slot))

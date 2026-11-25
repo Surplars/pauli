@@ -70,7 +70,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             return Reply::Error(Error::InvalidAddress);
         }
         match slot.request_start(entry, opaque) {
-            Ok(()) => match A::Smp::kick(slot.owner) {
+            Ok(()) => match Self::kick_posted(vm, slot) {
                 Ok(()) => Reply::Success(0),
                 Err(_) => Reply::Error(Error::Failed),
             },
@@ -84,12 +84,20 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         for slot in vm.cpus() {
             if mask & (1 << slot.index) != 0 && slot.status() != arch::CpuStatus::Stopped {
                 slot.mailbox.lock().post_ipi();
-                if A::Smp::kick(slot.owner).is_err() {
+                if Self::kick_posted(vm, slot).is_err() {
                     return Reply::Error(Error::Failed);
                 }
             }
         }
         Reply::Success(0)
+    }
+
+    // The HSM/mailbox work is already visible. Keep the original SBI error
+    // and let management retry the wake if the target is in untimed WFI.
+    fn kick_posted(vm: &Vm<A>, slot: &VcpuSlot<A::Vcpu>) -> Result<()> {
+        A::Smp::kick(slot.owner).inspect_err(|_| {
+            vm.devices.wake.fetch_or(1 << slot.index, Ordering::Release);
+        })
     }
     fn fence(
         &self,

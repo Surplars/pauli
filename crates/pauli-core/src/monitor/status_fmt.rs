@@ -155,8 +155,13 @@ impl Monitor {
             } else {
                 (bytes >> 10, "KiB")
             };
+            let exclusive = if vm.config.exclusive_cpus {
+                " exclusive=true"
+            } else {
+                ""
+            };
             self.terminal.output.host(format_args!(
-                "VM id={} epoch={} name={} state={:?} vcpus={} memory={size}{unit}\n",
+                "VM id={} epoch={} name={} state={:?} vcpus={} memory={size}{unit}{exclusive}\n",
                 vm.slot + 1,
                 vm.epoch(),
                 vm.config.name(),

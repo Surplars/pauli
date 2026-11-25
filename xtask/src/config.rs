@@ -198,6 +198,7 @@ fn parse_vm(table: &Table, dir: &Path) -> Result<Vm> {
             "interrupts",
             "vcpus",
             "cpu_affinity",
+            "exclusive_cpus",
             "bootargs",
             "kernel",
             "kernel_sha256",
@@ -225,6 +226,7 @@ fn parse_vm(table: &Table, dir: &Path) -> Result<Vm> {
     config.quantum_us = number(table, "quantum_us", config.quantum_us)?;
     config.vcpus = u8::try_from(number(table, "vcpus", 1)?)?;
     config.cpu_affinity = affinity(table.get("cpu_affinity"), config.vcpus)?;
+    config.exclusive_cpus = boolean(table, "exclusive_cpus", false)?;
     config.autostart = boolean(table, "autostart", false)?;
     config.net_uplink = boolean(table, "net_uplink", false)?;
     config.stop_on_reset = match text(table, "reset")?.unwrap_or("reload") {

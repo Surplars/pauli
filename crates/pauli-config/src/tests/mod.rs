@@ -33,6 +33,7 @@ fn fixture() -> BootConfig {
     config
 }
 
+mod exclusive;
 mod firmware;
 mod guest_tree;
 mod images;

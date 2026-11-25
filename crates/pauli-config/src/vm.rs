@@ -34,6 +34,7 @@ impl VmConfig {
             aia: false,
             vcpus: 1,
             cpu_affinity: CpuAffinity::Automatic,
+            exclusive_cpus: false,
             image: VmImage::default(),
             firmware: None,
         })
@@ -121,41 +122,124 @@ impl VmConfig {
             }
     }
     /// Validate against real host topology at the input/board boundary, not on
-    /// dispatch. Repeated owners are intentional: vCPUs may overcommit a hart.
+    /// dispatch. Only shared owners can be overcommitted.
     pub fn validate_placement(&self, host_cpus: u8) -> Result<(), Error> {
+        self.validated_pins(host_cpus).map(|_| ())
+    }
+
+    /// The explicit physical pins, or zero for a distributed affinity.
+    pub(super) fn validated_pins(&self, host_cpus: u8) -> Result<u64, Error> {
         if !(1..=MAX_GUEST_VCPUS).contains(&self.vcpus) {
             return Err(Error::Vcpus);
         }
         if !(1..=MAX_HOST_CPUS).contains(&host_cpus) {
             return Err(Error::Affinity);
         }
-        if self.cpu_affinity == CpuAffinity::Workers && host_cpus < 2 {
+        let CpuAffinity::Physical(owners) = self.cpu_affinity else {
+            return if self.exclusive_cpus
+                || (self.cpu_affinity == CpuAffinity::Workers && host_cpus < 2)
+            {
+                Err(Error::Affinity)
+            } else {
+                Ok(0)
+            };
+        };
+        let (used, padding) = owners.split_at(usize::from(self.vcpus));
+        if padding.iter().any(|&owner| owner != 0) {
             return Err(Error::Affinity);
         }
-        if let CpuAffinity::Physical(owners) = self.cpu_affinity {
-            for (index, hart) in owners.into_iter().enumerate() {
-                if (index < usize::from(self.vcpus) && hart >= host_cpus)
-                    || (index >= usize::from(self.vcpus) && hart != 0)
-                {
-                    return Err(Error::Affinity);
-                }
+        let mut mask = 0u64;
+        for &owner in used {
+            if owner >= host_cpus {
+                return Err(Error::Affinity);
             }
+            mask |= 1u64 << owner;
         }
-        Ok(())
+        if self.exclusive_cpus && mask.count_ones() != u32::from(self.vcpus) {
+            return Err(Error::Affinity);
+        }
+        Ok(mask)
+    }
+
+    /// Validate a boot or dynamic assignment against the complete boot reservation mask.
+    pub fn validate_placement_excluding(
+        &self,
+        boot: usize,
+        host_cpus: usize,
+        excluded: u64,
+    ) -> Result<(), Error> {
+        let eligible = eligible_owners(boot, host_cpus, excluded)?;
+        let pins = self.validated_pins(host_cpus as u8)?;
+        let valid = match self.cpu_affinity {
+            CpuAffinity::Physical(_) if self.exclusive_cpus => pins & !excluded == 0,
+            CpuAffinity::Physical(_) => pins & excluded == 0,
+            CpuAffinity::Workers => eligible & !(1u64 << boot) != 0,
+            CpuAffinity::Automatic => true,
+        };
+        if valid { Ok(()) } else { Err(Error::Affinity) }
     }
     /// Prevalidated, immutable epoch placement. Guest hart IDs and physical
     /// owners are separate namespaces, including when the boot hart is not 0.
     pub fn owner(&self, slot: usize, index: usize, boot: usize, host_cpus: usize) -> usize {
+        self.owner_excluding(slot, index, boot, host_cpus, 0)
+    }
+
+    /// Select one owner in boot-relative order. Distributed affinities require
+    /// at least one eligible native owner; Workers also skips the boot hart.
+    pub fn owner_excluding(
+        &self,
+        slot: usize,
+        index: usize,
+        boot: usize,
+        host_cpus: usize,
+        excluded: u64,
+    ) -> usize {
         match self.cpu_affinity {
-            CpuAffinity::Automatic => (boot + slot + index) % host_cpus,
             CpuAffinity::Physical(owners) => usize::from(owners[index]),
-            CpuAffinity::Workers => (boot + 1 + (slot + index) % (host_cpus - 1)) % host_cpus,
+            affinity => {
+                let workers = affinity == CpuAffinity::Workers;
+                let start = boot + usize::from(workers);
+                let mut eligible = (start..host_cpus)
+                    .chain(0..boot)
+                    .filter(|&owner| excluded & (1u64 << owner) == 0);
+                let count = if excluded == 0 {
+                    host_cpus - usize::from(workers)
+                } else {
+                    eligible.clone().count()
+                };
+                let ordinal = (slot % count + index % count) % count;
+                if excluded == 0 {
+                    (start + ordinal) % host_cpus
+                } else {
+                    eligible.nth(ordinal).expect("prevalidated eligible owner")
+                }
+            }
         }
     }
     /// All native owners of this slot under the same prevalidated placement used by dispatch.
     pub fn owner_mask(&self, slot: usize, boot: usize, host_cpus: usize) -> usize {
+        self.owner_mask_excluding(slot, boot, host_cpus, 0)
+    }
+    pub fn owner_mask_excluding(
+        &self,
+        slot: usize,
+        boot: usize,
+        host_cpus: usize,
+        excluded: u64,
+    ) -> usize {
         (0..usize::from(self.vcpus)).fold(0, |mask, index| {
-            mask | (1usize << self.owner(slot, index, boot, host_cpus))
+            mask | (1usize << self.owner_excluding(slot, index, boot, host_cpus, excluded))
         })
     }
+}
+
+pub(super) fn eligible_owners(boot: usize, host_cpus: usize, excluded: u64) -> Result<u64, Error> {
+    if host_cpus == 0 || host_cpus > usize::from(MAX_HOST_CPUS) || boot >= host_cpus {
+        return Err(Error::Affinity);
+    }
+    let native = u64::MAX >> (u64::BITS as usize - host_cpus);
+    if excluded & (!native | (1u64 << boot)) != 0 {
+        return Err(Error::Affinity);
+    }
+    Ok(native & !excluded)
 }

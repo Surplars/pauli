@@ -15,21 +15,31 @@ impl<A: HvArch> Vm<A> {
         boot: &pauli_config::BootConfig,
         config: VmConfig,
         slot: usize,
+        exclusive_owners: u64,
         epoch: u32,
         links: &'static DeviceLinks,
         now: u64,
     ) -> Result<Self> {
-        config
-            .validate_placement(board.info().host_cpus as u8)
-            .map_err(|_| HvError::InvalidConfig)?;
+        // The manager validated all placements before taking any board resources.
         let resources = board.take_resources(slot, &config)?;
-        Self::build(board, boot, config, slot, epoch, links, now, resources)
+        Self::build(
+            board,
+            boot,
+            config,
+            slot,
+            exclusive_owners,
+            epoch,
+            links,
+            now,
+            resources,
+        )
     }
     pub(crate) fn build<B: Board>(
         board: &B,
         boot: &pauli_config::BootConfig,
         config: VmConfig,
         slot: usize,
+        exclusive_owners: u64,
         epoch: u32,
         links: &'static DeviceLinks,
         now: u64,
@@ -41,19 +51,17 @@ impl<A: HvArch> Vm<A> {
                 .ok()
                 .filter(|ticks| *ticks != 0)
                 .ok_or(HvError::InvalidConfig)?;
-        config
-            .validate_placement(info.host_cpus as u8)
-            .map_err(|_| HvError::InvalidConfig)?;
         let payload = board.payload();
         let sstc =
             payload != Payload::Embedded && A::guest_sstc(resources.images.dtb, config.vcpus)?;
         if sstc
             && (payload != Payload::Linux
                 || config.firmware.is_some()
-                || !A::sstc_available_for_owners(config.owner_mask(
+                || !A::sstc_available_for_owners(config.owner_mask_excluding(
                     slot,
                     info.boot_cpu,
                     info.host_cpus,
+                    exclusive_owners,
                 )))
         {
             return Err(HvError::Unsupported);
@@ -73,7 +81,13 @@ impl<A: HvArch> Vm<A> {
         A::publish_code();
         let cpus = ArenaSlice::build(&mut resources.arena, usize::from(config.vcpus), |index| {
             let cpu = A::Vcpu::create(&space, index as u8, epoch, &config, image_boot)?;
-            let owner = config.owner(slot, index, info.boot_cpu, info.host_cpus);
+            let owner = config.owner_excluding(
+                slot,
+                index,
+                info.boot_cpu,
+                info.host_cpus,
+                exclusive_owners,
+            );
             Ok(VcpuSlot::new(cpu, epoch, index as u8, owner))
         })?;
         let devices = VmDevices::create(

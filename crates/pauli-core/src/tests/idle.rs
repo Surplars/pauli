@@ -5,6 +5,7 @@ use super::model::{Fixture, IDLE_DEADLINE, IDLE_ENTRIES, NOW, Timer};
 use crate::{arch::ExitKind, runtime::Dispatcher, vm::slot::CpuState};
 
 mod console_input;
+mod exclusive;
 mod joined;
 mod overcommit;
 mod rtc;

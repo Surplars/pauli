@@ -1,5 +1,5 @@
 //! Native wait after an empty dispatch; never changes a running vCPU's slice.
-//! Firmware-only snapshots pin live instances and take one short lock at a time before masking IRQs.
+//! Snapshot parked guest deadlines before masking IRQs. Native kicks remain latched until dispatch.
 use super::*;
 
 const FAST_POLL_HZ: u64 = 10_000;
@@ -53,7 +53,44 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         }
     }
 
-    fn firmware_wait(&self, owner: usize, manager: bool) -> Wait {
+    fn exclusive_worker_wait(&self, owner: usize) -> Wait {
+        // Only a boot VM can claim this owner, with exactly one local lane.
+        // Dynamic placements on other harts never add work to this scan.
+        for group in 0..pauli_config::MAX_BOOT_VMS.div_ceil(placement::GROUP) {
+            let Some((id, lanes)) = self.manager.placed_on(group, owner).pop_vm() else {
+                continue;
+            };
+            let Some(vm) = self.manager.available(group * placement::GROUP + id) else {
+                continue;
+            };
+            match vm.lifecycle.state() {
+                State::Stopping => return Wait::Poll, // The owner still owes retirement.
+                State::Stopped | State::Faulted => return Wait::Interrupt,
+                State::Ready => {}
+            }
+            let slot = &vm.cpus()[lanes.trailing_zeros() as usize];
+            let data = slot.data.lock();
+            return match (&data.context, data.state) {
+                (_, CpuState::Stopped) => Wait::Interrupt, // HSM start publishes then kicks.
+                (Some(cpu), CpuState::Waiting) => match cpu.wait_deadline() {
+                    Some(at) => Wait::Until {
+                        at,
+                        fast_io: false,
+                        #[cfg(feature = "selftest")]
+                        guest_timer: true,
+                    },
+                    None => Wait::Interrupt,
+                },
+                _ => Wait::Poll,
+            };
+        }
+        Wait::Interrupt
+    }
+
+    fn idle_wait(&self, owner: usize, manager: bool) -> Wait {
+        if !manager && self.manager.exclusive_owners() & (1u64 << owner) != 0 {
+            return self.exclusive_worker_wait(owner);
+        }
         if !self.firmware_only && !(B::IDLE_USE_GUEST_DEADLINE && self.diskless_single_hart) {
             return Wait::Poll;
         }
@@ -140,7 +177,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         let info = self.board.info();
         let owner = A::Smp::cpu_id();
         let manager = owner == info.boot_cpu;
-        let plan = self.firmware_wait(owner, manager);
+        let plan = self.idle_wait(owner, manager);
         masked::<A, _>(|| {
             // The native ISR may already have cleared its interrupt and queued
             // the byte since the last monitor pass. Do not sleep on that work.

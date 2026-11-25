@@ -134,6 +134,14 @@ pub fn prepare(
         crate::disk::register(&volume.input, volume.writable, true, &mut disks)?;
     }
     let (vms_top, mut config) = place(board, vms, dtbs_at, template_base, templates.end, &disks)?;
+    if config.vms.iter().flatten().any(|vm| vm.exclusive_cpus) {
+        // OpenSBI chooses the boot hart. Reject a profile now if no choice can work.
+        let count = usize::from(host_cpus);
+        ensure!(
+            (0..count).any(|boot| config.exclusive_owner_mask(boot, count).is_ok()),
+            "exclusive CPU placement leaves no valid topology for {count} host CPUs"
+        );
+    }
     let dtbs = build_dtbs(&mut config, vms, board.hz)?;
     let bytes = wire(config.encode())?;
     for (name, bytes, address) in [

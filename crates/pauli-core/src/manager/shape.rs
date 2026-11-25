@@ -10,7 +10,13 @@ use pauli_config::{CpuAffinity, MAX_GUEST_DTB, VmConfig};
 use pauli_control::ChildSpec;
 use pauli_hal::fdt::Fdt;
 
-pub(super) fn config(source: &VmConfig, spec: ChildSpec, host_cpus: u8) -> Result<VmConfig> {
+pub(super) fn config(
+    source: &VmConfig,
+    spec: ChildSpec,
+    boot_cpu: usize,
+    host_cpus: usize,
+    exclusive_owners: u64,
+) -> Result<VmConfig> {
     let mut child = source
         .renamed(spec.name.as_str())
         .map_err(|_| HvError::InvalidConfig)?;
@@ -30,10 +36,25 @@ pub(super) fn config(source: &VmConfig, spec: ChildSpec, host_cpus: u8) -> Resul
     if spec.shape != Default::default() {
         child
             .validate_guest_geometry()
-            .and_then(|()| child.validate_placement(host_cpus))
             .map_err(|_| HvError::InvalidConfig)?;
     }
+    child
+        .validate_placement_excluding(boot_cpu, host_cpus, exclusive_owners)
+        .map_err(|_| HvError::InvalidConfig)?;
     Ok(child)
+}
+
+#[cfg(test)]
+#[test]
+fn unshaped_worker_clone_requires_an_unreserved_worker() {
+    let mut template = VmConfig::new("template").unwrap();
+    template.cpu_affinity = CpuAffinity::Workers;
+    let spec = pauli_control::ChildName::new("child").unwrap().into();
+    assert!(config(&template, spec, 1, 3, 0b100).is_ok());
+    assert_eq!(
+        config(&template, spec, 1, 3, 0b101).err(),
+        Some(HvError::InvalidConfig)
+    );
 }
 
 #[derive(Clone, Copy)]

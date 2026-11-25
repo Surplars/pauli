@@ -7,9 +7,9 @@ use pauli_config::{MAX_GUEST_DTB, VmConfig};
 use pauli_control::{ChildSpec, DiskSlot, VmId};
 const _: () = assert!(DiskSlot::COUNT == pauli_config::MAX_DISKS);
 
-/// A clone never inherits a disk lease, network peer or native uplink.
+/// A clone never inherits an exclusive hart, disk lease, network peer or native uplink.
 pub(super) fn cloneable(vm: &VmConfig) -> bool {
-    vm.disk.is_none() && vm.net_peer.is_none() && !vm.net_uplink
+    !vm.exclusive_cpus && vm.disk.is_none() && vm.net_peer.is_none() && !vm.net_uplink
 }
 
 impl<A: HvArch> VmManager<A> {
@@ -32,7 +32,14 @@ impl<A: HvArch> VmManager<A> {
         {
             return Err(HvError::Unsupported);
         }
-        let mut config = shape::config(&source.config, spec, board.info().host_cpus as u8)?;
+        let info = board.info();
+        let mut config = shape::config(
+            &source.config,
+            spec,
+            info.boot_cpu,
+            info.host_cpus,
+            self.exclusive_owners,
+        )?;
         let reshape = config.memory_size != source.config.memory_size
             || config.vcpus != source.config.vcpus
             || spec.disk.is_some();
@@ -52,8 +59,8 @@ impl<A: HvArch> VmManager<A> {
         let pool = board.domain_pool().ok_or(HvError::Unsupported)?;
         self.admit(sponsor, &config)?;
         let (slot, reserved) = self.index.reserve(self.boot_count)?;
-        let info = board.info();
-        let owners = config.owner_mask(slot, info.boot_cpu, info.host_cpus);
+        let owners =
+            config.owner_mask_excluding(slot, info.boot_cpu, info.host_cpus, self.exclusive_owners);
         let target_sstc = config.firmware.is_none() && A::sstc_available_for_owners(owners);
         let source_sstc = source.guest_sstc();
         let mut change = (reshape || source_sstc != target_sstc).then_some(shape::DtbChange {
@@ -119,6 +126,7 @@ impl<A: HvArch> VmManager<A> {
             self.config,
             config,
             slot,
+            self.exclusive_owners,
             self.next_epoch()?, // Rejected geometry or exhausted RAM never consumes an identity.
             self.links,
             A::Timer::now(),

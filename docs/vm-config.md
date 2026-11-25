@@ -24,6 +24,7 @@ removes them on return. `PAULI_QEMU` (or `OPENION_QEMU`) can select a QEMU execu
 | `firmware`, `firmware_sha256`, `memory_kib` | Static RV64 VS ELF and checked digest; page-aligned private firmware RAM. Alternative to Linux `kernel` and `initramfs` |
 | `vcpus`, `quantum_us` | 1-16 vCPUs, 100-10000 us slice; default 1 and 2000 |
 | `cpu_affinity` | `automatic` (default), `workers`, or one physical owner index per vCPU |
+| `exclusive_cpus` | Reserve the VM's explicitly pinned harts for its lifetime. Defaults to `false` |
 | `autostart`, `reset` | Default manual start; `reload` (default) cold-restarts on guest reset, `stop` returns to monitor |
 | `interrupts` | `plic` by default, or `aia`; the latter requires `--aia-host` in QEMU |
 | `bootargs` | Linux command line; console default is `ttyS0,115200` |
@@ -54,12 +55,38 @@ and DMA only; they do not bound runtime VM count. Host-only ID pages grow on
 first use and are reused. Larger guests, fragmentation or index metadata can
 exhaust RAM below the advertised ceiling. `vm capacity` is not a free-slot count.
 
-Repeated CPU owner indices intentionally overcommit a physical CPU. The
+Shared VMs may repeat an owner index to overcommit a physical hart. The
 default `--host-cpus` is 1; use 2 or more for a `workers` profile. `--aia-host`
 enables AIA host support; `--features aia,aia-guest-file` additionally
 requests the hardware guest-file path. The optional uplink opens QEMU user
 networking only when the profile explicitly requests `net_uplink = true`.
 Paired networking does not create a TAP, bridge, gateway or port forward.
+
+The following `[[vm]]` fields dedicate physical owner 2 to a real-time guest.
+
+```toml
+vcpus = 1
+cpu_affinity = [2]
+exclusive_cpus = true
+```
+
+This example requires at least three host harts and a management hart other
+than owner 2. Owner indices refer to the board's native CPU topology. OpenSBI
+selects the boot hart, and Pauli checks the actual choice before starting VMs.
+Each exclusive vCPU needs a distinct pin. Other VMs' explicit pins must avoid
+all reserved owners. Automatic placement skips them, and `workers` also skips
+the management hart. One remaining shared worker suffices for multiple
+`workers` guests. Manifest v15 encodes an exclusive reservation in VM flag
+bit 11. Older readers reject that bit as reserved. Omitting the option or
+setting it to false produces the original v15 bytes.
+
+Reservations persist while the guest is stopped or faulted. A dynamic child
+uses only shared owners, and an exclusive VM cannot serve as a clone template.
+`vm status` adds `exclusive=true` to an exclusive VM's row and shows the
+owner of each vCPU below it. When that worker's guest executes WFI, Pauli can
+sleep until its guest timer or an interrupt without the 10 kHz maintenance
+poll. The management hart continues servicing devices. Interrupt latency also
+depends on platform interrupt routing and contention for shared memory.
 
 ## Host monitor
 

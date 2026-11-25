@@ -79,6 +79,73 @@ fn fixture(scratch: &mut Scratch) -> Input {
 }
 
 #[test]
+fn exclusive_toml_reaches_the_manifest_and_leaves_a_management_hart() {
+    let root = workspace();
+    let board = Board::load(&root, "qemu-virt-riscv").unwrap();
+    let mut scratch = Scratch::new(&root).unwrap();
+    let linux = fixture(&mut scratch);
+    let run = |scratch: &mut Scratch, tag: &str, host_cpus, fields: &str| -> Result<BootConfig> {
+        let profile = format!("[[vm]]\nname='rt'\ncpu_affinity=[0]\n{fields}");
+        let path = scratch.bytes(&format!("{tag}.toml"), profile.as_bytes())?;
+        let (mut vms, managed) = crate::config::profile(&path)?;
+        let media = prepare(
+            scratch,
+            &board,
+            &mut vms,
+            Defaults {
+                host_mib: None,
+                kernel: Some(&linux),
+                initrd: None,
+                disk: None,
+                managed: &managed,
+                probe: None,
+            },
+            host_cpus,
+        )?;
+        let bytes = fs::read(&media.loaders.last().unwrap().path)?;
+        Ok(BootConfig::decode(bytes.as_slice().try_into().unwrap()).unwrap())
+    };
+    let cfg = run(
+        &mut scratch,
+        "valid",
+        2,
+        "exclusive_cpus=true\n[[vm]]\nname='auto'",
+    )
+    .unwrap();
+    assert!(cfg.vms[0].unwrap().exclusive_cpus);
+    assert!(!cfg.vms[1].unwrap().exclusive_cpus);
+    assert_eq!(cfg.exclusive_owner_mask(1, 2), Ok(1));
+    assert_eq!(
+        cfg.exclusive_owner_mask(0, 2),
+        Err(pauli_config::Error::Affinity)
+    );
+
+    for (fields, hosts) in [
+        ("exclusive_cpus=true", 1),
+        (
+            "exclusive_cpus=true\n[[vm]]\nname='workers'\ncpu_affinity='workers'",
+            2,
+        ),
+        (
+            "exclusive_cpus=true\n[[vm]]\nname='overlap'\ncpu_affinity=[0]",
+            2,
+        ),
+        ("exclusive_cpus='true'", 2),
+    ] {
+        let mut other = Scratch::new(&root).unwrap();
+        assert!(run(&mut other, "invalid", hosts, fields).is_err());
+    }
+    let mut other = Scratch::new(&root).unwrap();
+    assert!(
+        !run(&mut other, "shared", 1, "exclusive_cpus=false")
+            .unwrap()
+            .vms[0]
+            .unwrap()
+            .exclusive_cpus
+    );
+}
+
+#[test]
 fn firmware_toml_pins_the_original_elf_and_does_not_inherit_linux_media() {
     use crate::elf::firmware::tests::{BASE, example};
     let root = workspace();

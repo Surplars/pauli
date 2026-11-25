@@ -9,11 +9,47 @@ impl BootConfig {
         self.vms.iter().flatten().count()
     }
 
+    /// Resolve all explicit reservations against the actual management hart and host width.
+    pub fn exclusive_owner_mask(&self, boot_cpu: usize, host_cpus: usize) -> Result<u64, Error> {
+        let host = u8::try_from(host_cpus).map_err(|_| Error::Affinity)?;
+        let reserved = self.exclusive_pins(host)?;
+        let eligible = vm::eligible_owners(boot_cpu, host_cpus, reserved)?;
+        if eligible & !(1u64 << boot_cpu) == 0
+            && self
+                .vms
+                .iter()
+                .flatten()
+                .any(|vm| vm.cpu_affinity == CpuAffinity::Workers)
+        {
+            return Err(Error::Affinity);
+        }
+        Ok(reserved)
+    }
+
+    /// Static reservations are meaningful before the boot hart or actual width is known.
+    fn exclusive_pins(&self, host_cpus: u8) -> Result<u64, Error> {
+        let mut reserved = 0;
+        let mut shared = 0;
+        for vm in self.vms.iter().flatten() {
+            let pins = vm.validated_pins(host_cpus)?;
+            if reserved & pins != 0 || (vm.exclusive_cpus && shared & pins != 0) {
+                return Err(Error::Affinity);
+            }
+            if vm.exclusive_cpus {
+                reserved |= pins;
+            } else {
+                shared |= pins;
+            }
+        }
+        Ok(reserved)
+    }
+
     /// External-format boundary. Board owners additionally validate physical
     /// ownership/limits before reserving backing or dispatching any vCPU.
     pub fn validate(&self) -> Result<(), Error> {
         self.validate_header()?;
         self.validate_disks()?;
+        self.exclusive_pins(MAX_HOST_CPUS)?;
         let mut assigned = [0; MAX_DISKS];
         for (index, vm) in self.vms.iter().flatten().enumerate() {
             self.validate_memory(vm)?;
@@ -27,8 +63,6 @@ impl BootConfig {
             if !(100..=10_000).contains(&vm.quantum_us) {
                 return Err(Error::Quantum);
             }
-            // The board rechecks explicit owners against its actual physical CPU count.
-            vm.validate_placement(MAX_HOST_CPUS)?;
             self.validate_network(index, vm)?;
             self.assign_disk(vm, &mut assigned)?;
             for other in self.vms[..index].iter().flatten() {

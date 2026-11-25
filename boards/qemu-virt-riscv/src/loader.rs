@@ -103,13 +103,13 @@ impl Loader {
     /// The launcher cannot know firmware's Sstc grants. Before any secondary is
     /// started, only guests wholly assigned to probed harts may gain Sstc.
     fn stage_timers(&mut self, topology: &Topology) -> Result<()> {
-        let mut upgrade = [false; MAX_BOOT_VMS];
-        for (index, vm) in self.config.vms.iter().flatten().enumerate() {
-            if vm.firmware.is_none() && vm.validate_placement(topology.count as u8).is_ok() {
-                let owners = vm.owner_mask(index, topology.boot, topology.count);
-                upgrade[index] = pauli_arch_riscv::sstc_available_for_owners(owners);
-            }
-        }
+        let upgrade = qemu_virt_riscv::guest_tree::sstc_upgrades(
+            &self.config,
+            topology.boot,
+            topology.count,
+            pauli_arch_riscv::sstc_available_for_owners,
+        )
+        .map_err(|_| HvError::InvalidConfig)?;
         if !upgrade.contains(&true) {
             return Ok(());
         }

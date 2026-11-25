@@ -19,6 +19,80 @@ fn round<const WORDS: usize>(
 }
 
 #[test]
+fn invalid_exclusive_topology_rejects_the_manifest_before_taking_boot_ram() {
+    use super::model::Arch;
+    use crate::{
+        HvError,
+        board::{Board, BootImages},
+        manager::{VmManager, VmStore},
+    };
+    use pauli_config::{CpuAffinity, MAX_DISKS, MAX_GUEST_VCPUS};
+    use std::boxed::Box;
+
+    let (board, _backing, _spare) =
+        Fixture::test_board(2, [1, 1], 0, [None; MAX_DISKS], |slot, vm| {
+            if slot == 0 {
+                let mut pins = [0; MAX_GUEST_VCPUS as usize];
+                pins[0] = 1;
+                vm.cpu_affinity = CpuAffinity::Physical(pins);
+                vm.exclusive_cpus = true;
+            } else {
+                vm.cpu_affinity = CpuAffinity::Workers;
+            }
+            BootImages {
+                kernel: &[0x31; 64],
+                initrd: &[],
+                dtb: &[0xd1; 64],
+            }
+        });
+    let board = Box::leak(Box::new(board));
+    let config = board.load_boot_config().unwrap();
+    assert!(config.validate().is_ok());
+    let store = Box::leak(Box::new(VmStore::<Arch>::new()));
+    assert_eq!(
+        VmManager::create(board, store).err(),
+        Some(HvError::InvalidConfig)
+    );
+    for (slot, vm) in config.vms.iter().flatten().enumerate() {
+        assert!(board.take_resources(slot, vm).is_ok());
+    }
+}
+
+#[test]
+fn status_preserves_common_lines_and_identifies_reserved_harts() {
+    use super::uart_capture::host_output;
+    use crate::monitor::Monitor;
+    use pauli_config::{CpuAffinity, MAX_GUEST_VCPUS};
+
+    let f = Fixture::with_config(3, [1, 2], 0, |slot, vm| {
+        if slot == 1 {
+            let mut pins = [0; MAX_GUEST_VCPUS as usize];
+            pins[..2].copy_from_slice(&[2, 1]);
+            vm.cpu_affinity = CpuAffinity::Physical(pins);
+            vm.exclusive_cpus = true;
+        }
+    });
+    let rt = &f.runtime;
+    assert_eq!(rt.manager.exclusive_owners(), 0b110);
+    let peer = rt.manager.vm(1).unwrap();
+    assert_eq!((peer.cpus()[0].owner, peer.cpus()[1].owner), (2, 1));
+    assert_eq!(rt.manager.vm(0).unwrap().cpus()[0].owner, 0);
+    let mut monitor = Monitor::new();
+    rt.board.input.lock().extend(b"vm status\n");
+    let status = host_output(|| monitor.poll(rt));
+    let mut rows = status.lines().filter(|line| line.starts_with("VM id="));
+    assert_eq!(
+        rows.next(),
+        Some("VM id=1 epoch=1 name=alpha state=Stopped vcpus=1 memory=64MiB")
+    );
+    assert_eq!(
+        rows.next(),
+        Some("VM id=2 epoch=2 name=beta state=Stopped vcpus=2 memory=64MiB exclusive=true")
+    );
+    assert_eq!(rows.next(), None);
+}
+
+#[test]
 fn sparse_and_full_sets_wrap_once_at_every_cursor() {
     const WORD: usize = usize::BITS as usize;
     const LIMIT: usize = 3 * WORD;

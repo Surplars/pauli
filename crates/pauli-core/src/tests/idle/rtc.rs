@@ -17,7 +17,7 @@ fn parked_pair() -> (Fixture, Dispatcher<Timer>) {
     (f, local)
 }
 
-fn write(f: &Fixture, slot: usize, address: u64, value: usize) {
+pub(super) fn write(f: &Fixture, slot: usize, address: u64, value: usize) {
     let m = &f.runtime.manager;
     let access = MmioAccess {
         gpa: address as usize,

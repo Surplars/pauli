@@ -58,11 +58,15 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
     }
 
     pub(crate) fn worker_wait(&self, owner: usize) -> Option<(bool, u64)> {
-        let info = self.board.info();
-        (self.firmware_only && owner != info.boot_cpu && A::Smp::SAMPLE_IDLE.is_some()).then(|| {
+        (self.observed_worker(owner) && A::Smp::SAMPLE_IDLE.is_some()).then(|| {
             let word = self.idle_wakes.workers[owner].load(Ordering::Acquire);
             (word & 1 != 0, word >> 1)
         })
+    }
+
+    fn observed_worker(&self, owner: usize) -> bool {
+        owner != self.board.info().boot_cpu
+            && (self.firmware_only || self.manager.exclusive_owners() & (1u64 << owner) != 0)
     }
 
     /// # Safety
@@ -75,7 +79,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         interval: Option<&mut arch::TickInterval>,
     ) {
         let sample = A::Smp::SAMPLE_IDLE;
-        let bracket = (disarmed && self.firmware_only && sample.is_some()).then(|| {
+        let bracket = (disarmed && sample.is_some() && self.observed_worker(owner)).then(|| {
             let counter = &self.idle_wakes.workers[owner];
             let base = counter.load(Ordering::Relaxed);
             counter.store(base | 1, Ordering::Release);

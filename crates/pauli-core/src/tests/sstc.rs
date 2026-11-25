@@ -199,3 +199,58 @@ fn opaque_trees_remain_byte_exact_and_incompatible_clones_stay_unpublished() {
     assert_eq!(dtb(&vm), dtb(&rt.manager.vm(1).unwrap()));
     check(&vm, false);
 }
+
+#[test]
+fn boot_and_child_timer_admission_use_the_owners_left_by_exclusive_pins() {
+    for (mode, boot_owner, child_owner) in
+        [(CpuAffinity::Automatic, 2, 3), (CpuAffinity::Workers, 3, 2)]
+    {
+        let _probes = OwnerProbes::with(1 << boot_owner);
+        let f = Fixture::with_templates(4, [1, 1], 100, |slot, vm| {
+            if slot == 0 {
+                let mut pins = [0; MAX_GUEST_VCPUS as usize];
+                pins[0] = 1;
+                vm.cpu_affinity = CpuAffinity::Physical(pins);
+                vm.exclusive_cpus = true;
+            } else {
+                vm.cpu_affinity = mode;
+            }
+            template_with_sstc(slot, vm, slot == 1)
+        });
+        let rt = &f.runtime;
+        assert_eq!(rt.manager.exclusive_owners(), 1 << 1);
+        assert_eq!(rt.manager.vm(0).unwrap().cpus()[0].owner, 1);
+        let template = rt.manager.vm(1).unwrap();
+        assert_eq!(template.cpus()[0].owner, boot_owner);
+        check(&template, true);
+        let mut target = Target(rt);
+        let spec = ChildName::new("copy").unwrap().into();
+        assert_eq!(
+            target.create(None, VmId(1), spec),
+            Err(pauli_control::Error::Unsupported)
+        );
+        assert_eq!(rt.manager.find("copy"), Err(HvError::NotFound));
+        let child = target.create(None, VmId(2), spec).unwrap();
+        let vm = rt.manager.vm(child.vm.0 as usize - 1).unwrap();
+        assert_eq!(vm.cpus()[0].owner, child_owner);
+        check(&vm, false);
+        drop(vm);
+        target.destroy(child.vm, child.epoch).unwrap();
+        let reshape = ChildSpec {
+            shape: Shape {
+                vcpus: core::num::NonZeroU8::new(2),
+                memory_mib: None,
+            },
+            ..spec
+        };
+        let child = target.create(None, VmId(2), reshape).unwrap();
+        let vm = rt.manager.vm(child.vm.0 as usize - 1).unwrap();
+        let second = if mode == CpuAffinity::Automatic { 0 } else { 3 };
+        assert_eq!(
+            (vm.cpus()[0].owner, vm.cpus()[1].owner),
+            (child_owner, second)
+        );
+        check(&vm, false);
+        check(&template, true);
+    }
+}
