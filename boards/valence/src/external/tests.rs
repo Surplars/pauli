@@ -10,6 +10,7 @@ fn range(base: usize, size: usize) -> PhysRange {
 fn input(archive: bool) -> External<'static> {
     External {
         manager: false,
+        aia: false,
         image: range(0x8900_0000, 7282696),
         initrd: archive.then(|| range(0x8100_0000, 0x074a970b)),
         ram: range(0xa000_0000, 512 << 20),
@@ -23,6 +24,7 @@ fn config(input: &External<'_>, h: &[u8], out: &mut [u8]) -> Result<BootConfig> 
         out,
         range(0x8022_0000, 48),
         &mut [0; MAX_GUEST_DTB],
+        GuestBoardLayout::DEFAULT,
     )
 }
 fn header(loaded: u64) -> [u8; HEADER_BYTES] {
@@ -98,6 +100,99 @@ fn wave8_manifest_and_guest_tree_use_different_address_spaces() {
 }
 
 #[test]
+fn native_guest_file_requires_an_aia_guest_and_a_physical_file() {
+    use crate::handoff::Handoff;
+    let mut handoff = Handoff {
+        external: None,
+        guest_ids: Some(127),
+    };
+    assert_eq!(handoff.guest_file_ids(), None);
+    let mut linux = input(false);
+    handoff.external = Some(linux);
+    assert_eq!(handoff.guest_file_ids(), None);
+    linux.aia = true;
+    handoff.external = Some(linux);
+    assert_eq!(handoff.guest_file_ids(), Some(127));
+    handoff.guest_ids = None;
+    assert_eq!(handoff.guest_file_ids(), None);
+}
+
+#[test]
+fn aligned_linux_grant_maps_as_a_single_root_leaf() {
+    use pauli_arch_riscv::gstage::{GStagePageTable, GStageRoot};
+    use pauli_hal::addr::PhysAddr;
+    let gib = 1usize << 30;
+    let host_base = 0x1_0000_0000;
+    let mut src = input(false);
+    src.ram = range(host_base, gib);
+    let boot = config(&src, &header(7605976), &mut [0; MAX_GUEST_DTB]).unwrap();
+    let vm = boot.vms[0].unwrap();
+    assert_eq!(
+        (vm.guest_base, vm.memory_size, vm.host_base),
+        (0x8000_0000, gib as u64, host_base as u64)
+    );
+    assert!(GuestBoardLayout::DEFAULT.admits_ram(vm.guest_base, vm.memory_size));
+    let guest = PhysAddr::new(vm.guest_base as usize);
+    let host = PhysAddr::new(vm.host_base as usize);
+    // SAFETY: private, inactive page-table fixture with no lower table storage.
+    // The scalar physical range is never dereferenced or installed on a hart.
+    let mut table =
+        unsafe { GStagePageTable::new_identity(Box::leak(Box::new(GStageRoot::new())), &mut []) };
+    unsafe { table.map_private_ram_1g(guest, host) }.unwrap();
+    let last = PhysAddr::new(guest.raw() + gib - 1);
+    assert_eq!(
+        table.translate(last),
+        Some(PhysAddr::new(host.raw() + gib - 1))
+    );
+    assert_eq!(table.translate(PhysAddr::new(guest.raw() + gib)), None);
+}
+
+#[test]
+fn aia_linux_uses_the_board_geometry_and_service_stays_on_plic() {
+    use pauli_config::ImsicIds;
+    for (ids, count) in [(ImsicIds::Ids127, 127), (ImsicIds::Ids255, 255)] {
+        let layout = GuestBoardLayout {
+            imsic_ids: ids,
+            ..GuestBoardLayout::DEFAULT
+        };
+        let mut src = input(false);
+        src.aia = true;
+        for manager in [false, true] {
+            src.manager = manager;
+            let mut tree = [0; MAX_GUEST_DTB];
+            let mut peer_tree = [0; MAX_GUEST_DTB];
+            let plan = super::config(
+                &src,
+                &header(7605976),
+                &mut tree,
+                range(0x8023_0000, 48),
+                &mut peer_tree,
+                layout,
+            );
+            if !cfg!(feature = "aia") || (manager && !cfg!(feature = "guest-control")) {
+                assert!(matches!(plan, Err(HvError::Unsupported)));
+                continue;
+            }
+            let plan = plan.unwrap();
+            let linux = plan.vms[0].unwrap();
+            assert!(linux.aia);
+            let fdt = Fdt::new(&tree[..linux.dtb_size as usize]).unwrap();
+            let imsic = fdt.find("/imsics@28000000").unwrap().unwrap();
+            assert_eq!(imsic.u32("riscv,num-ids").unwrap(), Some(count));
+            assert!(fdt.find("/plic@c000000").unwrap().is_none());
+            if let Some(peer) = plan.vms[1] {
+                assert!(manager && !peer.aia);
+                let fdt = Fdt::new(&peer_tree[..peer.dtb_size as usize]).unwrap();
+                assert!(fdt.find("/plic@c000000").unwrap().is_some());
+                assert!(fdt.find("/imsics@28000000").unwrap().is_none());
+            } else {
+                assert!(!manager);
+            }
+        }
+    }
+}
+
+#[test]
 fn malformed_or_overlapping_images_do_not_admit_a_vm() {
     let src = input(true);
     let mut dtb = [0; MAX_GUEST_DTB];
@@ -142,9 +237,15 @@ fn cold_boot_sources_remain_the_original_exact_loans() {
         ..input(true)
     };
     // SAFETY: both exact source ranges are initialized storage retained unmodified for this process.
-    let (boot, [Some(images), None]) =
-        (unsafe { stage(src, b"unused", Box::leak(Box::new([[0; MAX_GUEST_DTB]; 2]))) }).unwrap()
-    else {
+    let (boot, [Some(images), None]) = (unsafe {
+        stage(
+            src,
+            b"unused",
+            Box::leak(Box::new([[0; MAX_GUEST_DTB]; 2])),
+            GuestBoardLayout::DEFAULT,
+        )
+    })
+    .unwrap() else {
         panic!("ordinary Linux must not see a service")
     };
     assert_eq!(images.kernel.as_ptr(), backing.kernel.as_ptr());
@@ -161,21 +262,40 @@ fn packaged_external_guest_plan() {
     let dir = PathBuf::from(std::env::var_os("WAVE8_BUNDLE").expect("WAVE8_BUNDLE"));
     let native =
         fs::read(std::env::var_os("WAVE8_EXTERNAL_DTB").expect("WAVE8_EXTERNAL_DTB")).unwrap();
-    let grant = crate::handoff::validate_blob(0, &native)
-        .unwrap()
-        .expect("external guest");
+    let handoff = crate::handoff::validate_blob(0, &native).unwrap();
+    let grant = handoff.external.expect("external guest");
     let mut image = fs::File::open(dir.join("Image")).unwrap();
     assert_eq!(image.metadata().unwrap().len(), grant.image.size() as u64);
     let mut h = [0; HEADER_BYTES];
     image.read_exact(&mut h).unwrap();
     let mut guest_tree = [0; MAX_GUEST_DTB];
-    let boot = config(&grant, &h, &mut guest_tree).unwrap();
+    let boot = super::config(
+        &grant,
+        &h,
+        &mut guest_tree,
+        range(0x8022_0000, 48),
+        &mut [0; MAX_GUEST_DTB],
+        handoff.layout(),
+    )
+    .unwrap();
     let vm = boot.vms[0].unwrap();
     let runtime = u64::from_le_bytes(h[16..24].try_into().unwrap());
     assert_eq!(vm.image.kernel_memory_size, runtime);
     assert_eq!(vm.image.kernel_source, 0x8900_0000);
-    let linux_bytes = if grant.manager { 510 } else { 512 } << 20;
-    assert_eq!((vm.host_base, vm.memory_size), (0xa000_0000, linux_bytes));
+    let linux_bytes = grant.ram.size() as u64 - if grant.manager { ALIGN } else { 0 };
+    assert_eq!(
+        (vm.host_base, vm.memory_size),
+        (grant.ram.base() as u64, linux_bytes)
+    );
+    assert_eq!(vm.aia, grant.aia);
+    if grant.manager {
+        let service = boot.vms[1].unwrap();
+        assert_eq!(
+            (service.host_base, service.memory_size),
+            (vm.host_base + linux_bytes, 64 << 10)
+        );
+        assert!(!service.aia);
+    }
     assert_eq!(
         (boot.management, vm.name()),
         (
@@ -184,6 +304,12 @@ fn packaged_external_guest_plan() {
         )
     );
     let tree = Fdt::new(&guest_tree[..vm.dtb_size as usize]).unwrap();
+    let imsic = tree.find("/imsics@28000000").unwrap();
+    assert_eq!(imsic.is_some(), vm.aia);
+    if let Some(imsic) = imsic {
+        let ids = handoff.layout().imsic_ids.max_id() as u32;
+        assert_eq!(imsic.u32("riscv,num-ids").unwrap(), Some(ids));
+    }
     let chosen = tree.find("/chosen").unwrap().unwrap();
     assert_eq!(chosen.text("bootargs").unwrap(), Some(grant.bootargs));
     let guest = tree

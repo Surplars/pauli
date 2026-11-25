@@ -10,6 +10,28 @@ pub struct MmioRegion {
     pub size: u64,
 }
 
+/// Highest implemented IMSIC interrupt identity. Identity zero is reserved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ImsicIds {
+    Ids127 = 127,
+    Ids255 = 255,
+}
+
+impl ImsicIds {
+    pub const fn from_count(count: usize) -> Option<Self> {
+        match count {
+            127 => Some(Self::Ids127),
+            255 => Some(Self::Ids255),
+            _ => None,
+        }
+    }
+
+    pub const fn max_id(self) -> usize {
+        self as usize
+    }
+}
+
 /// Virtual platform ABI independent of the physical board or interrupt routing.
 /// IMSIC reserves one file page per possible vCPU; the DTB exposes actual files only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +44,7 @@ pub struct GuestBoardLayout {
     pub plic: MmioRegion,
     pub aplic: MmioRegion,
     pub imsic: MmioRegion,
+    pub imsic_ids: ImsicIds,
     pub uart_irq: u32,
     pub block_irq: u32,
     pub net_irq: u32,
@@ -90,6 +113,7 @@ impl GuestBoardLayout {
             base: 0x2800_0000,
             size: 4096 * crate::MAX_GUEST_VCPUS as u64,
         },
+        imsic_ids: ImsicIds::Ids255,
         uart_irq: 10,
         block_irq: 1,
         net_irq: 2,

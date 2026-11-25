@@ -9,8 +9,9 @@ pauli-config = { path = "../../crates/pauli-config" }
 pauli-arch-riscv = { path = "../../crates/pauli-arch-riscv" }
 pauli-ns16550a = { path = "../../crates/pauli-drivers/ns16550a" }
 [features]
-default = ["aia", "guest-control"]
+default = ["aia", "aia-guest-file", "guest-control"]
 aia = ["pauli-arch-riscv/aia"]
+aia-guest-file = ["aia", "pauli-arch-riscv/aia-guest-file"]
 guest-control = ["pauli-arch-riscv/guest-control"]
 selftest = ["pauli-arch-riscv/selftest"]
 [[bin]]

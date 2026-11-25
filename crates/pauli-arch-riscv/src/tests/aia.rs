@@ -246,6 +246,47 @@ fn targets_and_reset(a: &mut VirtualAia, peer: &mut VirtualAia) {
     assert!(peer.line(0) && !a.line(0));
 }
 
+#[test]
+fn virtual_geometry_controls_msi_aplic_csr_and_late_inbox() {
+    use crate::aia::registers::{EIE, EIP, EITHRESHOLD, GENMSI, TARGET_FIRST};
+    use pauli_config::ImsicIds;
+    for ids in [ImsicIds::Ids127, ImsicIds::Ids255] {
+        let mut vm = VirtualAia::with_ids(1, ids);
+        let last = ids.max_id();
+        let last_word = 2 * (last / 64);
+        config(&mut vm, 0);
+        assert_eq!(indirect(&mut vm, 0, EIE, None), usize::MAX & !1);
+        assert_eq!(indirect(&mut vm, 0, EIE + last_word, None), usize::MAX);
+        for offset in [EIP, EIE] {
+            assert_eq!(
+                indirect(&mut vm, 0, offset + last_word + 2, Some(usize::MAX)),
+                0
+            );
+            assert_eq!(indirect(&mut vm, 0, offset + last_word + 2, None), 0);
+        }
+        vm.msi_access(0, Some(last + 1));
+        write(&mut vm, GENMSI, last + 1);
+        write(&mut vm, TARGET_FIRST, last + 1);
+        assert_eq!(vm.aplic_access(TARGET_FIRST, None), Some(0));
+        assert_eq!(vm.aplic_access(GENMSI, None), Some(0));
+        assert_eq!(top(&mut vm, 0, false).0, 0);
+        write(&mut vm, GENMSI, last);
+        assert_eq!(indirect(&mut vm, 0, EITHRESHOLD, Some(usize::MAX)), 0);
+        assert_eq!(indirect(&mut vm, 0, EITHRESHOLD, None), last);
+        assert_eq!(top(&mut vm, 0, false).0, 0);
+        indirect(&mut vm, 0, EITHRESHOLD, Some(0));
+        assert_eq!(top(&mut vm, 0, true).0, (last << 16) | last);
+        let file = vm.take_file(0);
+        vm.msi_access(0, Some(last + 1));
+        vm.msi_access(0, Some(last));
+        vm.put_file(0, file);
+        assert_eq!(top(&mut vm, 0, true).0, (last << 16) | last);
+        assert_eq!(top(&mut vm, 0, false).0, 0);
+        vm.quiesce();
+        assert_eq!(vm.take_file(0), imsic::File::with_ids(ids));
+    }
+}
+
 fn all_ids() {
     // Model every implemented EIP/EIE bit, masking, threshold and priority.
     for id in 1..=255 {

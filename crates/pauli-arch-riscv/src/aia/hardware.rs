@@ -3,18 +3,16 @@
 //! here, so saving/clearing it cannot race an untracked physical producer.
 //! Ownership/Lock Ordering: one IRQ-masked physical owner; put before any foreign control.
 //! Invariants: file 0 is HS-only, file 1 is reserved and empty on reuse.
-use super::{file_state, imsic::File};
+use super::{file_bank::OwnerFile, file_state, imsic::File};
 use crate::host::aia_csr::hypervisor as csr;
 use crate::vcpu::VirtualCpu;
-use core::{
-    marker::PhantomData,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use core::marker::PhantomData;
+use pauli_config::ImsicIds;
 
 const FILE: usize = 1;
 const BIT: usize = 1 << FILE;
-static READY: AtomicUsize = AtomicUsize::new(0);
-static USED: AtomicUsize = AtomicUsize::new(0);
+// Each owner probes and publishes its own file without enabling any other hart.
+static OWNERS: [OwnerFile; crate::MAX_CPUS] = [const { OwnerFile::new() }; crate::MAX_CPUS];
 
 /// Reserve exactly the profile we can save in full. Other sizes retain software
 /// AIA, rather than exposing extra physical IDs and leaking them on reuse.
@@ -22,9 +20,15 @@ static USED: AtomicUsize = AtomicUsize::new(0);
 /// Dedicated HS owner, H+Ssaia discovered, IRQs masked, before publishing jobs.
 /// Firmware/board policy reserves guest file 1 exclusively for this cache.
 pub unsafe fn init_owner(guest_ids: Option<usize>) -> bool {
-    if !super::available() || guest_ids != Some(super::imsic::MAX_ID) {
+    let local = &OWNERS[crate::host::cpu_id()];
+    // A repeated boot probe cannot leave an earlier size advertised on failure.
+    local.publish(None);
+    let Some(ids) = guest_ids
+        .and_then(ImsicIds::from_count)
+        .filter(|_| super::available())
+    else {
         return false;
-    }
+    };
     // SAFETY: this IRQ-masked owner holds the discovered bank and exclusively reserved guest file 1.
     let old_enable = unsafe { csr::hgeie::read() };
     let old_status = unsafe { csr::hstatus::read() };
@@ -44,29 +48,26 @@ pub unsafe fn init_owner(guest_ids: Option<usize>) -> bool {
     // Firmware/reset contents are unspecified. Establish the empty-file
     // invariant once here, and preserve it on every put/reuse afterwards.
     // SAFETY: this IRQ-masked owner holds the discovered bank and exclusively reserved guest file 1.
-    let _ = file_state::save_clear(&mut unsafe { Window::new() });
-    READY.fetch_or(owner_bit(), Ordering::Release);
+    let _ = file_state::save_clear(&mut unsafe { Window::new() }, ids);
+    local.publish(Some(ids));
     true
-}
-fn owner_bit() -> usize {
-    1usize << crate::host::cpu_id()
 }
 
 /// Never Send: the file, optional VS bank and physical owner share a lifetime.
 pub struct Cache {
+    ids: ImsicIds,
     bound: bool,
     _local: PhantomData<*mut ()>,
 }
 impl Cache {
     /// # Safety
     /// Dedicated owner with IRQs masked until this cache is put and dropped.
-    pub unsafe fn acquire() -> Option<Self> {
-        let bit = owner_bit();
-        if READY.load(Ordering::Acquire) & bit == 0 {
+    pub unsafe fn acquire(requested: ImsicIds) -> Option<Self> {
+        if !OWNERS[crate::host::cpu_id()].acquire(requested) {
             return None;
         }
-        assert_eq!(USED.fetch_or(bit, Ordering::Relaxed) & bit, 0);
         Some(Self {
+            ids: requested,
             bound: false,
             _local: PhantomData,
         })
@@ -79,6 +80,7 @@ impl Cache {
     /// its complete file under the VM device lock before calling load.
     pub unsafe fn load(&mut self, cpu: &mut VirtualCpu, file: File) {
         assert!(!self.bound);
+        assert_eq!(file.ids(), self.ids);
         let external = file.line();
         // SAFETY: this IRQ-masked owner holds the discovered bank and exclusively reserved guest file 1.
         file_state::load(&mut unsafe { Window::new() }, file);
@@ -90,7 +92,7 @@ impl Cache {
     pub unsafe fn merge(&mut self, pending: [u64; super::imsic::WORDS]) {
         assert!(self.bound);
         // SAFETY: this IRQ-masked owner holds the discovered bank and exclusively reserved guest file 1.
-        file_state::merge(pending, || unsafe { Window::new() });
+        file_state::merge(self.ids, pending, || unsafe { Window::new() });
     }
     /// # Safety
     /// Before any control reset, foreign context or owner dispatch. Caller must
@@ -98,7 +100,7 @@ impl Cache {
     pub unsafe fn put(&mut self, cpu: &mut VirtualCpu) -> File {
         assert!(self.bound);
         // SAFETY: this IRQ-masked owner holds the discovered bank and exclusively reserved guest file 1.
-        let file = file_state::save_clear(&mut unsafe { Window::new() });
+        let file = file_state::save_clear(&mut unsafe { Window::new() }, self.ids);
         cpu.bind_imsic(0, file.line());
         self.bound = false;
         file
@@ -107,7 +109,7 @@ impl Cache {
 impl Drop for Cache {
     fn drop(&mut self) {
         assert!(!self.bound, "put IMSIC before releasing the physical owner");
-        USED.fetch_and(!owner_bit(), Ordering::Relaxed);
+        OWNERS[crate::host::cpu_id()].publish(Some(self.ids));
     }
 }
 

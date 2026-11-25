@@ -18,7 +18,7 @@ use pauli_arch_riscv::{
     },
     interface::{RiscvHvArch, smp},
 };
-use pauli_config::{BootConfig, MAX_GUEST_DTB, VmConfig};
+use pauli_config::{BootConfig, GuestBoardLayout, MAX_GUEST_DTB, VmConfig};
 use pauli_core::{
     BootStorage, HvError, Result,
     board::{Board, BoardInfo, BootImages, Payload, VmResources},
@@ -49,6 +49,7 @@ static BOARD: Once<Wave8> = Once::new();
 pub static RUNTIME: BootStorage<RiscvHvArch, Wave8> = BootStorage::new();
 pub struct Wave8 {
     info: BoardInfo,
+    layout: GuestBoardLayout,
     boot: BootConfig,
     payload: Payload,
     guests: SpinLock<Slots>,
@@ -60,6 +61,9 @@ impl Board for Wave8 {
     const IDLE_USE_GUEST_DEADLINE: bool = true;
     fn info(&self) -> BoardInfo {
         self.info
+    }
+    fn layout(&self) -> GuestBoardLayout {
+        self.layout
     }
     fn payload(&self) -> Payload {
         self.payload
@@ -97,12 +101,19 @@ pub unsafe fn prepare(hart: usize, dtb: usize) -> Result<&'static Wave8> {
     // SAFETY: startup installed our stack/tp, disabled IRQs, and preserved a0/a1.
     unsafe { host::trap::install_vector() };
     // SAFETY: firmware supplied the native blob; validate its extent and board identity before MMIO.
-    let external = unsafe { handoff::validate(hart, dtb)? };
+    let handoff = unsafe { handoff::validate(hart, dtb)? };
     if !sbi::probe(sbi::TIME) {
         return Err(HvError::Unsupported);
     }
-    smp::install_topology(&[hart], None)?;
+    let guest_ids = handoff.guest_file_ids();
+    smp::install_topology(&[hart], guest_ids)?;
     pauli_arch_riscv::init_capabilities(true, true, true);
+    #[cfg(feature = "aia-guest-file")]
+    // SAFETY: the validated guest-file window belongs to the sole HS owner,
+    // with IRQs masked. init_owner checks file 1 is implemented and unused.
+    let aia_file = unsafe { pauli_arch_riscv::aia::hardware::init_owner(guest_ids) };
+    #[cfg(not(feature = "aia-guest-file"))]
+    let aia_file = false;
     // SAFETY: validated single-hart OpenSBI board, before IRQ or dispatcher startup.
     unsafe { pauli_arch_riscv::init_boot_sstc(1) };
     pauli_core::trace::set_sstc_active(pauli_arch_riscv::sstc_available());
@@ -112,8 +123,9 @@ pub unsafe fn prepare(hart: usize, dtb: usize) -> Result<&'static Wave8> {
         static __hv_end: u8;
     }
     let end = &raw const __hv_end as usize;
+    let layout = handoff.layout();
     // SAFETY: only the boot hart consumes the validated firmware loans and static storage.
-    let (payload, boot, guests) = unsafe { resources(external)? };
+    let (payload, boot, guests) = unsafe { resources(handoff.external, layout)? };
     let info = BoardInfo {
         ram_base: RAM_BASE,
         ram_size: RAM_BYTES,
@@ -123,15 +135,17 @@ pub unsafe fn prepare(hart: usize, dtb: usize) -> Result<&'static Wave8> {
         boot_cpu: 0,
     };
     pauli_hal::hv_info!(
-        "Valence: HS hart 0, timebase {} Hz, {:?} guest, sstc={}, stats={:#x}\r",
+        "Valence: HS hart 0, timebase {} Hz, {:?} guest, sstc={}, aia_file={}, stats={:#x}\r",
         TIMEBASE_HZ,
         payload,
         pauli_arch_riscv::sstc_available(),
+        aia_file,
         &raw const pauli_core::trace::PAULI_HS_STATS as usize
     );
     BOARD
         .set(Wave8 {
             info,
+            layout,
             boot,
             payload,
             guests: SpinLock::new(guests),
@@ -221,13 +235,19 @@ fn embedded() -> Result<(BootConfig, BootImages)> {
 }
 unsafe fn resources(
     external: Option<handoff::External<'_>>,
+    layout: GuestBoardLayout,
 ) -> Result<(Payload, BootConfig, Slots)> {
     let (payload, boot, images) = match external {
         Some(input) => {
             // SAFETY: exclusive once-only boot writer; native DTB validation established
             // immutable image loans and an entirely disjoint guest RAM assignment.
             let (boot, images) = unsafe {
-                super::external::stage(input, crate::guest::service(), &mut *(&raw mut GUEST_DTB))?
+                super::external::stage(
+                    input,
+                    crate::guest::service(),
+                    &mut *(&raw mut GUEST_DTB),
+                    layout,
+                )?
             };
             (Payload::Linux, boot, images)
         }

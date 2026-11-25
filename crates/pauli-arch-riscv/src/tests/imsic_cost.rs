@@ -39,7 +39,9 @@ impl file_state::Registers for Window<'_> {
 }
 
 fn merge(pending: [u64; WORDS], counts: &mut Counts) {
-    file_state::merge(pending, || Window::open(counts));
+    file_state::merge(pauli_config::ImsicIds::Ids255, pending, || {
+        Window::open(counts)
+    });
 }
 
 fn sample<const PERIOD: usize>(label: &str, ids: &[usize]) {

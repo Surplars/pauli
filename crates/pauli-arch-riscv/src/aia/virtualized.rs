@@ -12,7 +12,9 @@ use super::{
     file_bank::{Bank, Storage},
     imsic::File,
 };
+use pauli_config::ImsicIds;
 pub struct VirtualAia {
+    ids: ImsicIds,
     aplic: Aplic,
     files: Storage,
     cpus: usize,
@@ -21,9 +23,13 @@ pub struct VirtualAia {
 }
 impl VirtualAia {
     pub const fn new(cpus: usize) -> Self {
+        Self::with_ids(cpus, ImsicIds::Ids255)
+    }
+    pub const fn with_ids(cpus: usize, ids: ImsicIds) -> Self {
         Self {
+            ids,
             aplic: Aplic::new(),
-            files: Storage::Inline(Bank::new(cpus)),
+            files: Storage::Inline(Bank::with_ids(cpus, ids)),
             cpus,
             claims: 0,
             csr_accesses: 0,
@@ -32,11 +38,18 @@ impl VirtualAia {
     /// The board lends this bank until every producer and vCPU owner has
     /// joined. A guest MMIO reset is never permission to reset a shared bank.
     pub fn with_shared(cpus: usize, files: &'static pauli_hal::sync::SpinLock<Bank>) -> Self {
-        assert_eq!(files.lock().cpus(), cpus);
+        let ids = {
+            let bank = files.lock();
+            assert_eq!(bank.cpus(), cpus);
+            bank.ids()
+        };
         Self {
             files: Storage::Shared(files),
-            ..Self::new(cpus)
+            ..Self::with_ids(cpus, ids)
         }
+    }
+    pub const fn ids(&self) -> ImsicIds {
+        self.ids
     }
     pub fn hardware(&self) -> HardwareStats {
         self.files.with(Bank::hardware)

@@ -55,7 +55,7 @@ pub struct VmDevices<I: VirtualIrqChip> {
     /// Guest vCPU lanes whose owner must resample the IRQ chip.
     pub(crate) wake: AtomicUsize,
     bus: MmioBus,
-    layout: GuestBoardLayout,
+    pub(super) layout: GuestBoardLayout,
     pub(super) lanes: usize,
 }
 impl<I: VirtualIrqChip> VmDevices<I> {
@@ -85,7 +85,7 @@ impl<I: VirtualIrqChip> VmDevices<I> {
             Some(rtc) => rtc.unix_ns()?,
             None => 0,
         };
-        let chip = I::create(config.vcpus, config.aia)?;
+        let chip = I::create_with_imsic_ids(config.vcpus, config.aia, layout.imsic_ids)?;
         // Binding the peer link is the final fallible step: no failed VM can
         // leave behind an endpoint that a later peer would see as active.
         let net = Net::bind(slot, epoch, config, &links.peer, native)?;

@@ -14,6 +14,13 @@ pub enum RiscvIrqChip {
 }
 impl VirtualIrqChip for RiscvIrqChip {
     fn create(vcpus: u8, advanced: bool) -> Result<Self> {
+        Self::create_with_imsic_ids(vcpus, advanced, pauli_config::ImsicIds::Ids255)
+    }
+    fn create_with_imsic_ids(
+        vcpus: u8,
+        advanced: bool,
+        ids: pauli_config::ImsicIds,
+    ) -> Result<Self> {
         if !(1..=crate::MAX_VCPUS as u8).contains(&vcpus) {
             return Err(HvError::InvalidVcpu);
         }
@@ -21,7 +28,7 @@ impl VirtualIrqChip for RiscvIrqChip {
             if !cfg!(feature = "aia") || !crate::aia::available() {
                 return Err(HvError::Unsupported);
             }
-            Ok(Self::Advanced(VirtualAia::new(vcpus as usize)))
+            Ok(Self::Advanced(VirtualAia::with_ids(vcpus as usize, ids)))
         } else {
             Ok(Self::Legacy(VirtualPlic::with_contexts(vcpus as usize)))
         }

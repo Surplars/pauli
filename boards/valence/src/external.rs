@@ -18,13 +18,14 @@ pub(super) unsafe fn stage(
     input: External<'_>,
     service: &'static [u8],
     trees: &'static mut [[u8; MAX_GUEST_DTB]; 2],
+    layout: GuestBoardLayout,
 ) -> Result<(BootConfig, Images)> {
     // SAFETY: only the exact validated, initialized Image bytes are borrowed.
     let kernel = unsafe { source(input.image) };
     let code = PhysRange::new(service.as_ptr() as usize, service.len())
         .map_err(|_| HvError::InvalidImage)?;
     let [linux_tree, service_tree] = trees;
-    let boot = config(&input, kernel, linux_tree, code, service_tree)?;
+    let boot = config(&input, kernel, linux_tree, code, service_tree, layout)?;
     let initrd = match input.initrd {
         // SAFETY: the optional archive has the same retained, disjoint source contract.
         Some(range) => unsafe { source(range) },
@@ -51,6 +52,10 @@ unsafe fn source(range: PhysRange) -> &'static [u8] {
 fn linux(input: &External<'_>, header: &[u8]) -> Result<VmConfig> {
     let mut vm = VmConfig::new(if input.manager { "manager" } else { "linux" })
         .map_err(|_| HvError::InvalidConfig)?;
+    if input.aia && !cfg!(feature = "aia") {
+        return Err(HvError::Unsupported);
+    }
+    vm.aia = input.aia;
     let file_size = input.image.size() as u64;
     vm.image = VmImage {
         kernel_source: input.image.base() as u64,
@@ -63,7 +68,9 @@ fn linux(input: &External<'_>, header: &[u8]) -> Result<VmConfig> {
     vm.host_base = input.ram.base() as u64;
     // Preserve a 2 MiB boundary for Linux superpage mappings. The final tail
     // is not a pool: the service receives just its private 64 KiB, no more.
-    vm.memory_size = input.ram.size() as u64 - if input.manager { ALIGN } else { 0 };
+    vm.memory_size = (input.ram.size() as u64)
+        .checked_sub(if input.manager { ALIGN } else { 0 })
+        .ok_or(HvError::InvalidMemory)?;
     vm.autostart = true;
     Ok(vm)
 }
@@ -85,10 +92,10 @@ fn service(code: PhysRange, host: u64) -> Result<VmConfig> {
     Ok(vm)
 }
 
-fn render(vm: &mut VmConfig, args: &str, out: &mut [u8]) -> Result<()> {
+fn render(vm: &mut VmConfig, args: &str, out: &mut [u8], layout: GuestBoardLayout) -> Result<()> {
     vm.dtb_size = pauli_config::guest_dtb::riscv_with_sstc(
         vm,
-        GuestBoardLayout::DEFAULT,
+        layout,
         TIMEBASE_HZ as u32,
         args,
         pauli_arch_riscv::sstc_available(),
@@ -104,12 +111,13 @@ fn config(
     tree: &mut [u8],
     code: PhysRange,
     peer_tree: &mut [u8],
+    layout: GuestBoardLayout,
 ) -> Result<BootConfig> {
     if input.manager && !cfg!(feature = "guest-control") {
         return Err(HvError::Unsupported);
     }
     let mut vm = linux(input, header)?;
-    render(&mut vm, input.bootargs, tree)?;
+    render(&mut vm, input.bootargs, tree, layout)?;
     // The boot manifest encodes a page-aligned numeric envelope; unlike the
     // individual slices in BootImages, this envelope grants no read authority.
     let archive = input.initrd.unwrap_or(input.image);
@@ -118,7 +126,7 @@ fn config(
     let mut dtb_size = vm.dtb_size;
     let peer = if input.manager {
         let mut peer = service(code, vm.host_base + vm.memory_size)?;
-        render(&mut peer, "", peer_tree)?;
+        render(&mut peer, "", peer_tree, layout)?;
         // DTB buffers have a fixed slot stride; only their generated prefixes
         // appear as restart images. Linux arguments are never copied to the peer.
         peer.dtb_offset = MAX_GUEST_DTB as u64;

@@ -146,6 +146,7 @@ impl<'a> Platform<'a> {
             root,
             self.board,
             (!self.features.is_empty()).then_some(self.features.as_str()),
+            false,
         )
     }
     pub fn command(

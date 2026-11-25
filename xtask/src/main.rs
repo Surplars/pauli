@@ -29,12 +29,23 @@ fn main() -> Result<()> {
     match command {
         "build" | "image" => {
             let allowed = if command == "image" {
-                &["board", "features", "release", "output"][..]
+                &[
+                    "board",
+                    "features",
+                    "no-default-features",
+                    "release",
+                    "output",
+                ][..]
             } else {
-                &["board", "features", "release"]
+                &["board", "features", "no-default-features", "release"]
             };
             options.only(allowed)?;
-            let path = build::board(root, &board, options.value("features"))?;
+            let path = build::board(
+                root,
+                &board,
+                options.value("features"),
+                options.flag("no-default-features"),
+            )?;
             if command == "image" {
                 let output = options
                     .value("output")

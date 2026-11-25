@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+// Append after valence-linux.dtsi. This ordinary Linux grant starts above
+// Wave9's rpu@d0000000 reservation. Check actual DDR and OpenSBI PMP coverage.
+// For a manager, change the size to 0x40200000 for the aligned 2 MiB tail.
+&{/reserved-memory} {
+    /delete-node/ guest-ram@a0000000;
+    guest-ram@100000000 {
+        compatible = "openion,wave8-guest-ram";
+        reg = <0x1 0x0 0x0 0x40000000>;
+        no-map;
+    };
+};

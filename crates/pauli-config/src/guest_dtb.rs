@@ -192,7 +192,7 @@ fn interrupts(f: &mut Writer<'_>, vm: &VmConfig, layout: GuestBoardLayout) -> Re
     f.prop("interrupt-controller", &[])?;
     f.prop("msi-controller", &[])?;
     f.u32("phandle", MSI)?;
-    f.u32("riscv,num-ids", 255)?;
+    f.u32("riscv,num-ids", layout.imsic_ids.max_id() as u32)?;
     f.prop("interrupts-extended", &[contexts])?;
     f.end()
 }

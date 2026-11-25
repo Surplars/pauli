@@ -371,7 +371,7 @@ fn verify_process(
     Ok(())
 }
 fn fixture(root: &Path, board: &Board) -> Result<Vec<u8>> {
-    let path = build::binary(root, &board.target, "pauli-linux-probe", None)?;
+    let path = build::binary(root, &board.target, "pauli-linux-probe", None, false)?;
     let mut fixture = Vec::new();
     File::open(path)?
         .take(MAX_FIXTURE_BYTES + 1)

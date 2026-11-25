@@ -1,6 +1,7 @@
 //! In-memory native DTBs: exercise the complete grant walk without dtc, guest
 //! files or physical pointers. All bytes and reserves belong to each test.
 use super::*;
+use crate::handoff::tests::blob::Tokens;
 
 type Props = Vec<(&'static str, Vec<u8>)>;
 
@@ -40,36 +41,6 @@ impl Default for Fixture {
     }
 }
 
-// Only the FDT tokens this fixture needs. Structure words are big endian;
-// property values remain raw so malformed cell counts are tested unchanged.
-#[derive(Default)]
-struct Tokens {
-    data: Vec<u8>,
-    strings: Vec<u8>,
-}
-impl Tokens {
-    fn tag(&mut self, word: u32) {
-        self.data.extend(word.to_be_bytes());
-    }
-    fn pad(&mut self) {
-        self.data.resize(self.data.len().next_multiple_of(4), 0);
-    }
-    fn begin(&mut self, name: &str, props: &Props) {
-        self.tag(1);
-        self.data.extend(name.as_bytes());
-        self.data.push(0);
-        self.pad();
-        for (name, raw) in props {
-            self.tag(3);
-            self.tag(raw.len() as u32);
-            self.tag(self.strings.len() as u32);
-            self.strings.extend(name.as_bytes());
-            self.strings.push(0);
-            self.data.extend(raw);
-            self.pad();
-        }
-    }
-}
 impl Fixture {
     fn blob(&self) -> Vec<u8> {
         let mut w = Tokens::default();
@@ -98,30 +69,19 @@ impl Fixture {
         w.tag(2);
         w.tag(2);
         w.tag(9);
-        let structure = 40 + self.reserve_map.len() + 16;
-        let strings = structure + w.data.len();
-        let header = [
-            0xd00d_feed,
-            (strings + w.strings.len()) as u32,
-            structure as u32,
-            strings as u32,
-            40,
-            17,
-            16,
-            0,
-            w.strings.len() as u32,
-            w.data.len() as u32,
-        ];
-        let mut out: Vec<_> = header.into_iter().flat_map(u32::to_be_bytes).collect();
-        out.extend(&self.reserve_map);
-        out.extend([0; 16]);
-        out.extend(w.data);
-        out.extend(w.strings);
-        out
+        w.finish(&self.reserve_map)
     }
     fn accepted(&self) -> bool {
         let bytes = self.blob();
         granted(Fdt::new(&bytes).unwrap()).is_ok()
+    }
+    fn aligned(base: usize, size: usize, manager: bool) -> Self {
+        let mut f = Self::default();
+        f.nodes[0][2].1 = tuple(base, size);
+        if manager {
+            f.chosen.push(("openion,guest-role", b"manager\0".to_vec()));
+        }
+        f
     }
     fn initrd(&mut self, base: usize, end: usize) {
         self.chosen
@@ -323,6 +283,121 @@ fn manager_requires_an_explicit_native_grant_independent_of_both_command_lines()
             expected
         );
     }
+}
+
+#[test]
+fn irq_policy_is_one_exact_native_string_for_an_external_guest() {
+    const KEY: &str = "openion,guest-irq";
+    for (raw, expected) in [
+        (None, false),
+        (Some(b"plic\0".as_slice()), false),
+        (Some(b"aia\0".as_slice()), true),
+    ] {
+        let mut f = Fixture::default();
+        f.chosen.push((
+            "openion,guest-bootargs",
+            b"openion,guest-irq=aia\0".to_vec(),
+        ));
+        if let Some(value) = raw {
+            f.chosen.push((KEY, value.to_vec()));
+        }
+        let bytes = f.blob();
+        assert_eq!(
+            granted(Fdt::new(&bytes).unwrap()).unwrap().unwrap().aia,
+            expected
+        );
+    }
+    for values in [
+        vec![b"aia".as_slice()],
+        vec![b"AIA\0"],
+        vec![b""],
+        vec![b"plic\0aia\0"],
+        vec![b"aia\0", b"aia\0"],
+        vec![b"plic\0", b"aia\0"],
+    ] {
+        let mut f = Fixture::default();
+        f.chosen
+            .extend(values.into_iter().map(|raw| (KEY, raw.to_vec())));
+        let bytes = f.blob();
+        assert_eq!(granted(Fdt::new(&bytes).unwrap()), Err(Error::Property));
+    }
+    for raw in [b"aia\0".as_slice(), b"plic\0"] {
+        let f = Fixture {
+            chosen: vec![(KEY, raw.to_vec())],
+            nodes: vec![],
+            ..Default::default()
+        };
+        let bytes = f.blob();
+        assert_eq!(granted(Fdt::new(&bytes).unwrap()), Err(Error::Property));
+    }
+}
+
+#[test]
+fn aligned_grant_requires_the_exact_role_geometry_and_a_single_covering_bank() {
+    const BASE: usize = 0x1_0000_0000;
+    const TAIL: usize = pauli_config::ALIGN as usize;
+    for (manager, size) in [(false, GIGA), (true, GIGA + TAIL)] {
+        for base in [ALIGNED_RAM_MIN, BASE] {
+            let f = Fixture::aligned(base, size, manager);
+            let bytes = f.blob();
+            let guest = granted(Fdt::new(&bytes).unwrap()).unwrap().unwrap();
+            assert_eq!(guest.ram, PhysRange::new(base, size).unwrap());
+            assert_eq!(guest.manager, manager);
+        }
+        for (base, len) in [
+            (BASE + TAIL, size),
+            (GUEST_RAM_BASE, size),
+            (BASE, size - 4096),
+            (BASE, size + 4096),
+            (BASE, if manager { GIGA } else { GIGA + TAIL }),
+        ] {
+            assert!(!Fixture::aligned(base, len, manager).accepted());
+        }
+        let mut f = Fixture::aligned(BASE, size, manager);
+        f.ddr = tuple(0x8000_0000, GIGA);
+        f.ddr.extend(tuple(BASE, size / 2));
+        f.ddr.extend(tuple(BASE + size / 2, size - size / 2));
+        assert!(!f.accepted());
+        f.ddr.extend(tuple(BASE, size));
+        assert!(f.accepted());
+    }
+    let mut unrepresentable = Fixture::aligned(1usize << 56, GIGA, false);
+    unrepresentable.ddr.extend(tuple(1usize << 56, GIGA));
+    assert!(!unrepresentable.accepted());
+    let last_base = (1usize << 56) - GIGA;
+    for manager in [false, true] {
+        let size = GIGA + if manager { TAIL } else { 0 };
+        let mut last = Fixture::aligned(last_base, size, manager);
+        last.ddr.extend(tuple(last_base, size));
+        assert_eq!(last.accepted(), !manager);
+    }
+    assert!(!Fixture::aligned(usize::MAX - GIGA + 1, GIGA, false).accepted());
+}
+
+#[test]
+fn aligned_grant_checks_every_reservation_including_the_manager_tail() {
+    let tail = pauli_config::ALIGN as usize;
+    let size = GIGA + tail;
+    let base = ALIGNED_RAM_MIN;
+    for addr in [0xd000_0000, base + GIGA, base + size - 1] {
+        let mut f = Fixture::aligned(base, size, true);
+        f.reserve_map = tuple(addr, 1);
+        assert!(!f.accepted());
+        f.reserve_map.clear();
+        let foreign = vec![("reg", tuple(addr, 1))];
+        f.nodes.insert(0, foreign);
+        assert!(!f.accepted());
+        f.nodes.reverse();
+        assert!(!f.accepted());
+    }
+    let mut f = Fixture::aligned(base, size, true);
+    f.reserve_map = tuple(base + size, 4096);
+    assert!(f.accepted());
+    f.nodes.push(ram_node());
+    assert!(!f.accepted());
+    let mut f = Fixture::aligned(base, size, true);
+    f.nodes[0].push(("reg", tuple(base, size)));
+    assert!(!f.accepted());
 }
 
 #[test]

@@ -13,8 +13,7 @@ impl Resident<VirtualCpu> for RiscvResident {
         Self {
             bank: crate::resident::Resident::default(),
             #[cfg(feature = "aia-guest-file")]
-            // SAFETY: this scoped owner is IRQ-masked until put/drop.
-            file: unsafe { crate::aia::hardware::Cache::acquire() },
+            file: None,
         }
     }
     fn put(&mut self, cpu: &mut VirtualCpu) {
@@ -22,13 +21,18 @@ impl Resident<VirtualCpu> for RiscvResident {
     }
     fn load_interrupts(&mut self, _cpu: &mut VirtualCpu, _chip: &mut RiscvIrqChip) -> Result<()> {
         #[cfg(feature = "aia-guest-file")]
-        if let (Some(file), RiscvIrqChip::Advanced(chip)) = (&mut self.file, _chip) {
-            // SAFETY: the core owns this pinned vCPU, and serializes its file inbox here.
+        if let RiscvIrqChip::Advanced(chip) = _chip {
+            // SAFETY: the core owns this IRQ-masked hart and serializes the inbox.
             unsafe {
-                if file.bound() {
-                    file.merge(chip.take_pending(_cpu.index() as usize));
-                } else {
-                    file.load(_cpu, chip.take_file(_cpu.index() as usize));
+                if self.file.is_none() {
+                    self.file = crate::aia::hardware::Cache::acquire(chip.ids());
+                }
+                if let Some(file) = &mut self.file {
+                    if file.bound() {
+                        file.merge(chip.take_pending(_cpu.index() as usize));
+                    } else {
+                        file.load(_cpu, chip.take_file(_cpu.index() as usize));
+                    }
                 }
             }
         }

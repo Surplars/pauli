@@ -106,3 +106,33 @@ fn sstc_advertisement_applies_only_to_linux_when_enabled() {
     assert!(contains(&out[..n_fw], b"rv64imac_zicsr_zifencei_zicntr\0"));
     assert!(!contains(&out[..n_fw], b"sstc\0"));
 }
+
+#[test]
+fn imsic_node_advertises_the_selected_file_size_only_for_aia() {
+    use crate::ImsicIds;
+    use pauli_hal::fdt::Fdt;
+
+    let mut vm = VmConfig::new("linux").unwrap();
+    let mut buf = [0; MAX_GUEST_DTB];
+    for ids in [ImsicIds::Ids127, ImsicIds::Ids255] {
+        let layout = GuestBoardLayout {
+            imsic_ids: ids,
+            ..GuestBoardLayout::DEFAULT
+        };
+        for aia in [false, true] {
+            vm.aia = aia;
+            for sstc in [false, true] {
+                let len = riscv_with_sstc(&vm, layout, 100_000_000, "", sstc, &mut buf).unwrap();
+                let tree = Fdt::new(&buf[..len]).unwrap();
+                let node = tree.find("/imsics@28000000").unwrap();
+                assert_eq!(node.is_some(), aia);
+                if let Some(node) = node {
+                    assert_eq!(
+                        node.u32("riscv,num-ids").unwrap(),
+                        Some(ids.max_id() as u32)
+                    );
+                }
+            }
+        }
+    }
+}

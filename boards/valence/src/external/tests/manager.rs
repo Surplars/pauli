@@ -10,13 +10,28 @@ fn trusted_role_alone_selects_the_manager_and_private_service() {
     src.bootargs = "console=ttyS0 openion,role=manager";
     let code = range(0x8023_0000, 48);
     let h = header(7605976);
-    let plan = super::super::config(&src, &h, &mut linux_tree, code, &mut peer_tree).unwrap();
+    let plan = super::super::config(
+        &src,
+        &h,
+        &mut linux_tree,
+        code,
+        &mut peer_tree,
+        GuestBoardLayout::DEFAULT,
+    )
+    .unwrap();
     assert!(!plan.management && plan.count() == 1);
     assert_eq!(plan.vms[0].unwrap().name(), "linux");
 
     src.manager = true;
     src.bootargs = "console=ttyS0 openion,role=guest owner-secret";
-    let result = super::super::config(&src, &h, &mut linux_tree, code, &mut peer_tree);
+    let result = super::super::config(
+        &src,
+        &h,
+        &mut linux_tree,
+        code,
+        &mut peer_tree,
+        GuestBoardLayout::DEFAULT,
+    );
     if !cfg!(feature = "guest-control") {
         assert!(matches!(result, Err(HvError::Unsupported)));
         return;
@@ -71,8 +86,50 @@ fn trusted_role_alone_selects_the_manager_and_private_service() {
         range(code.base() + 1, 48),
         range(code.base(), PAGE_SIZE + 1),
     ] {
-        assert!(super::super::config(&src, &h, &mut linux_tree, bad_code, &mut peer_tree).is_err());
+        assert!(
+            super::super::config(
+                &src,
+                &h,
+                &mut linux_tree,
+                bad_code,
+                &mut peer_tree,
+                GuestBoardLayout::DEFAULT
+            )
+            .is_err()
+        );
     }
+}
+
+#[cfg(feature = "guest-control")]
+#[test]
+fn aligned_manager_leaves_only_the_firmware_service_in_the_trailing_two_mib() {
+    let mut input = input(false);
+    let gib = 1usize << 30;
+    input.manager = true;
+    input.ram = range(0x1_0000_0000, gib + ALIGN as usize);
+    let mut tree = [0; MAX_GUEST_DTB];
+    let boot = config(&input, &header(7605976), &mut tree).unwrap();
+    let [Some(linux), Some(service), None, None] = boot.vms else {
+        panic!("expected two VMs")
+    };
+    assert_eq!(
+        (linux.guest_base, linux.host_base, linux.memory_size),
+        (0x8000_0000, 0x1_0000_0000, gib as u64)
+    );
+    assert!(GuestBoardLayout::DEFAULT.admits_ram(linux.guest_base, linux.memory_size));
+    assert_eq!(service.host_base, linux.host_base + linux.memory_size);
+    assert_eq!(service.memory_size, 64 << 10);
+    assert!(service.host_base + service.memory_size <= input.ram.end() as u64);
+    assert!(!service.aia && !service.autostart);
+    let fdt = Fdt::new(&tree[..linux.dtb_size as usize]).unwrap();
+    assert_eq!(
+        fdt.find("/memory@80000000")
+            .unwrap()
+            .unwrap()
+            .reg()
+            .unwrap(),
+        Some((0x8000_0000, gib as u64))
+    );
 }
 
 #[test]
@@ -106,6 +163,7 @@ fn slots_lend_only_their_own_restart_images_ram_and_arena() {
     } {
         let input = External {
             manager,
+            aia: false,
             image,
             initrd: Some(archive),
             ram: range(base as usize, layout.size()),
@@ -114,7 +172,8 @@ fn slots_lend_only_their_own_restart_images_ram_and_arena() {
         let trees = Box::leak(Box::new([[0; MAX_GUEST_DTB]; 2]));
         let peer_code = &src.peer[..48];
         // SAFETY: all initialized sources are retained, disjoint from the assigned RAM.
-        let (plan, images) = unsafe { stage(input, peer_code, trees) }.unwrap();
+        let (plan, images) =
+            unsafe { stage(input, peer_code, trees, GuestBoardLayout::DEFAULT) }.unwrap();
         let arenas: &'static mut Arenas = Box::leak(Box::new([MaybeUninit::uninit(); 2]));
         // SAFETY: no other handle or reference to the allocated RAM exists;
         // the stage above only inspected its geometry, never its bytes.

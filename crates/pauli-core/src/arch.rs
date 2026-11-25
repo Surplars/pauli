@@ -80,6 +80,16 @@ pub trait VirtualIrqChip: Send {
     fn create(vcpus: u8, advanced: bool) -> Result<Self>
     where
         Self: Sized;
+    /// Construct the same interrupt geometry the board advertised in its guest DTB.
+    fn create_with_imsic_ids(vcpus: u8, advanced: bool, ids: pauli_config::ImsicIds) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        if advanced && ids != pauli_config::ImsicIds::Ids255 {
+            return Err(HvError::Unsupported);
+        }
+        Self::create(vcpus, advanced)
+    }
     fn access(&mut self, region: IrqRegion, offset: usize, write: Option<usize>) -> Option<usize>;
     fn register(&mut self, cpu: u8, access: RegisterAccess) -> Option<usize>;
     fn set_level(&mut self, source: u32, asserted: bool);

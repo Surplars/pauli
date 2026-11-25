@@ -4,8 +4,8 @@
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::BTreeMap;
 const HELP: &str = "cargo xtask test
-cargo xtask build --board <qemu-virt-riscv|valence> [--features LIST] [--release]
-cargo xtask image --board valence [--output PATH]
+cargo xtask build --board <qemu-virt-riscv|valence> [--no-default-features] [--features LIST] [--release]
+cargo xtask image --board valence [--no-default-features] [--features LIST] [--output PATH]
 cargo xtask run --vm PROFILE --kernel IMAGE [--initrd ARCHIVE] [--host-cpus N] [--host-memory-mib N]
     [--disk RAW] [--persistent] [--features LIST] [--aia-host] [--dry-run]
 cargo xtask run --rtos-elf CONTROL --service-elf SERVICE [--host-cpus N] [--dry-run]
@@ -43,7 +43,7 @@ impl Options {
             }
             let name = option.strip_prefix("--").context("expected --option")?;
             let value = match name {
-                "release" | "persistent" | "aia-host" | "dry-run" => None,
+                "release" | "persistent" | "aia-host" | "dry-run" | "no-default-features" => None,
                 "board" | "features" | "output" | "vm" | "kernel" | "initrd" | "disk"
                 | "host-cpus" | "host-memory-mib" | "suite" | "timeout-secs" | "domains"
                 | "rtos-elf" | "timer-elf" | "service-elf" | "samples" | "host-elf" => Some(

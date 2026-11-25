@@ -2,7 +2,7 @@
 //! indices name files in this VM, never physical harts or host MSI addresses.
 //! Ownership/Lock Ordering: one VM device owner, then the file bank.
 //! Invariants: only validated VM-local target files and IDs can receive MSIs.
-use super::imsic::{File, MAX_ID};
+use super::imsic::File;
 use super::registers::{
     CLRIE, CLRIENUM, CLRIP, CLRIPNUM, GENMSI, SETIE, SETIENUM, SETIP, SETIPNUM, SETIPNUM_BE,
     SETIPNUM_LE, SOURCE_FIRST, SOURCE_LAST, TARGET_FIRST, TARGET_LAST,
@@ -88,12 +88,16 @@ impl Aplic {
             0
         }
     }
-    fn target(value: u32, cpus: usize) -> u32 {
-        if (value >> 18) as usize >= cpus || value & 0x3f000 != 0 || value & 0x7ff > MAX_ID as u32 {
-            0
-        } else {
-            value & 0xfffc_07ff
+    fn target(value: u32, files: &[File]) -> u32 {
+        let hart = (value >> 18) as usize;
+        if value & 0x3f000 != 0
+            || files
+                .get(hart)
+                .is_none_or(|file| value & 0x7ff > file.ids().max_id() as u32)
+        {
+            return 0;
         }
+        value & 0xfffc_07ff
     }
     pub fn read(&self, offset: usize) -> u32 {
         match offset {
@@ -138,10 +142,10 @@ impl Aplic {
             CLRIE => self.enabled &= !value,
             CLRIENUM => self.enabled &= !Self::number(value),
             TARGET_FIRST..=TARGET_LAST => {
-                self.targets[(offset - GENMSI) / 4] = Self::target(value, files.len())
+                self.targets[(offset - GENMSI) / 4] = Self::target(value, files)
             }
             GENMSI => {
-                self.generated = Self::target(value, files.len());
+                self.generated = Self::target(value, files);
                 Self::send(self.generated, files);
             }
             _ => {}

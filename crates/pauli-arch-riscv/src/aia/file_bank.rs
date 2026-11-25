@@ -4,8 +4,33 @@
 //! Ownership/Lock Ordering: VM devices then this short bank lock; owner transfers take only the bank.
 //! Invariants: bound files have one physical owner and a separate late-injection inbox.
 use super::imsic::{File, WORDS};
+use pauli_config::ImsicIds;
 use pauli_hal::sync::SpinLock as Mutex;
 const CPUS: usize = crate::MAX_VCPUS;
+
+/// A hart publishes its physical file capacity only after clearing the file.
+/// An unpublished or borrowed file cannot satisfy a guest request.
+#[cfg(any(test, all(target_arch = "riscv64", feature = "aia-guest-file")))]
+pub(crate) struct OwnerFile(core::sync::atomic::AtomicUsize);
+#[cfg(any(test, all(target_arch = "riscv64", feature = "aia-guest-file")))]
+impl OwnerFile {
+    pub const fn new() -> Self {
+        Self(core::sync::atomic::AtomicUsize::new(0))
+    }
+    pub fn publish(&self, ids: Option<ImsicIds>) {
+        self.0.store(
+            ids.map_or(0, ImsicIds::max_id),
+            core::sync::atomic::Ordering::Release,
+        );
+    }
+    pub fn acquire(&self, ids: ImsicIds) -> bool {
+        use core::sync::atomic::Ordering;
+        self.0
+            .compare_exchange(ids.max_id(), 0, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HardwareStats {
     #[cfg(all(feature = "selftest", feature = "aia-guest-file"))]
@@ -23,9 +48,12 @@ pub struct Bank {
 }
 impl Bank {
     pub const fn new(cpus: usize) -> Self {
+        Self::with_ids(cpus, ImsicIds::Ids255)
+    }
+    pub const fn with_ids(cpus: usize, ids: ImsicIds) -> Self {
         assert!(cpus > 0 && cpus <= CPUS);
         Self {
-            files: [const { File::new() }; CPUS],
+            files: [File::with_ids(ids); CPUS],
             cpus,
             hardware: HardwareStats {
                 #[cfg(all(feature = "selftest", feature = "aia-guest-file"))]
@@ -37,6 +65,9 @@ impl Bank {
                 bound: 0,
             },
         }
+    }
+    pub const fn ids(&self) -> ImsicIds {
+        self.files[0].ids()
     }
     pub fn cpus(&self) -> usize {
         self.cpus
@@ -60,7 +91,8 @@ impl Bank {
             self.hardware.loaded_vcpus |= 1 << cpu;
         }
         self.hardware.loads += 1;
-        core::mem::replace(&mut self.files[cpu], File::new())
+        let empty = File::with_ids(self.ids());
+        core::mem::replace(&mut self.files[cpu], empty)
     }
     pub fn take_pending(&mut self, cpu: usize) -> [u64; WORDS] {
         assert!(self.hardware.bound & (1 << cpu) != 0);
@@ -78,6 +110,7 @@ impl Bank {
     /// lock was acquired; never overwrite the inbox with the older snapshot.
     pub fn put_file(&mut self, cpu: usize, mut file: File) {
         assert!(self.hardware.bound & (1 << cpu) != 0);
+        assert_eq!(file.ids(), self.ids());
         file.merge_pending(self.files[cpu].take_pending());
         self.files[cpu] = file;
         self.hardware.bound &= !(1 << cpu);
@@ -91,7 +124,8 @@ impl Bank {
             self.hardware.bound, 0,
             "join hardware file owners before quiesce"
         );
-        self.files = [const { File::new() }; CPUS];
+        let empty = File::with_ids(self.ids());
+        self.files.fill(empty);
     }
 }
 /// Serial/software instances keep inline state. Dedicated owners share a bank

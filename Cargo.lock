@@ -103,6 +103,9 @@ dependencies = [
 [[package]]
 name = "pauli-config"
 version = "0.1.0"
+dependencies = [
+ "pauli-hal",
+]
 
 [[package]]
 name = "pauli-control"

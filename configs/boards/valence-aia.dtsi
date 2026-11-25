@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+// Append after valence-linux.dtsi to give Linux the virtual APLIC/IMSIC topology
+// also used on QEMU. Wave9 may back the virtual file with physical guest file 1.
+&{/chosen} {
+    openion,guest-irq = "aia";
+};

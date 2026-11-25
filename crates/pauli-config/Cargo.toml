@@ -5,3 +5,6 @@ edition.workspace = true
 
 [lib]
 bench = false
+
+[dev-dependencies]
+pauli-hal = { path = "../pauli-hal" }

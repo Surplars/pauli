@@ -62,7 +62,7 @@ The addresses below are RISC-V addresses, **not** PS-side DDR aliases.
    has empty `no-map` and four big-endian 32-bit `reg` cells. They grant
    the entire `[0xa0000000,0xc0000000)` (512 MiB) **to the HV exclusively**
    for guest RAM: no loader, firmware, RPU or DMA user may retain or
-   overwrite it. Do not change this physical grant when selecting manager.
+   overwrite it. Both roles accept this legacy grant. The optional larger grants are described below.
 5. Rebuild the package's DT bundle offsets, flat layout/size, checksums,
    and any RPU/JTAG CRC or image-length metadata for the changed bytes.
    With flat RV base `0x80000000`, the HV, archive and kernel source are
@@ -82,6 +82,59 @@ Set `NATIVE_DTB` to the chosen output, e.g. `"$OUT/ooo-hv-manager.dtb"`:
 WAVE8_BUNDLE="$WAVE8" WAVE8_EXTERNAL_DTB="$NATIVE_DTB" \
   cargo test --offline --locked -p valence packaged_external_guest_plan -- --ignored --nocapture
 ```
+
+## Optional guest interrupt controller
+
+With the default Valence build, omitting `openion,guest-irq` or setting it to
+`"plic"` retains the original Linux interrupt topology. For a Linux kernel with APLIC and IMSIC
+drivers, append the [AIA fragment](../configs/boards/valence-aia.dtsi) to the
+external Linux or manager DTS. The choice applies to Linux. The manager's
+firmware service continues to receive a virtual PLIC.
+
+On Wave9 A2 the supervisor IMSIC at `0x28000000` has 127 interrupt IDs.
+Two guest-index bits cover four 4 KiB pages for this hart, including the HS
+file at index zero. The guest-file ID count defaults to the supervisor count
+when the native DT omits `riscv,num-guest-ids`. Pauli uses the same virtual
+ID range for the Linux DTB, software MSI delivery and CSR emulation. The
+Wave9 default is 1–127. An explicit 255-ID guest file selects IDs 1–255.
+
+`aia-guest-file` enables owner-local caching in physical guest file 1 and
+is included in Valence's default build. The HS banner's `aia_file=true`
+reports that file 1 was admitted for the selected AIA guest. PLIC and
+embedded boots leave this physical file untouched. The guest MSI page remains
+virtual. A software-only build is available with
+`cargo xtask build --board valence --no-default-features --features aia`.
+An explicit AIA topology requires the `aia` build feature. Add
+`guest-control` when building a management image.
+
+## Optional 1 GiB Linux RAM grant
+
+Append the [1 GiB RAM fragment](../configs/boards/valence-1g-ram.dtsi)
+after `valence-linux.dtsi` to replace its legacy reservation. The example
+starts at HPA `0x1_0000_0000`, above the Wave9 `rpu@d0000000` carveout.
+The complete grant must fit inside one available DDR bank and be disjoint
+from the handoff, image sources and other reservations.
+
+| Role | Native grant size | Backing at the example HPA |
+| --- | --- | --- |
+| Ordinary Linux | `0x40000000` (1,024 MiB) | Linux uses the entire grant |
+| Manager | `0x40200000` (1,026 MiB) | Linux uses the first GiB. Service uses the first 64 KiB of the remaining 2 MiB |
+
+For a manager append `valence-manager.dtsi` and set the final size cell in
+the RAM fragment to `0x40200000`. Pauli rejects an exact 1 GiB manager grant.
+This leaves Linux with the same aligned guest interval
+`[0x80000000,0xc0000000)` for either role and permits a single Sv39x4
+1 GiB RAM leaf. Any alternate HPA must be at least `0xc0000000`, aligned
+to 1 GiB and available exclusively to Pauli.
+
+Inspect the effective OpenSBI domain/PMP regions for the boot hart before
+using these grants. HS needs access to the complete Linux range and, for a
+manager, the service range starting at the next GiB boundary. For example,
+separate naturally aligned regions of orders 30 and 21 describe the 1 GiB
+region and its 2 MiB tail. Check permissions and higher-priority overlapping
+regions against firmware and RPU reservations. The native `no-map` grant
+declares ownership to Pauli. OpenSBI programs the physical permissions.
+[OpenSBI domain memory regions](https://github.com/riscv-software-src/opensbi/blob/master/docs/domain_support.md)
 
 ## What Linux receives
 
@@ -103,7 +156,7 @@ gets only its first 64 KiB (`[0xbfe00000,0xbfe10000)`); the rest is
 unassigned. The two VMs do not share RAM, the Linux initrd, or an address
 space. They time-share the one native hart.
 
-The initrd GPA is recomputed for other archive sizes. The guest receives a
+The initrd GPA is recomputed for other archive sizes. With the default interrupt topology Linux receives a
 virtual PLIC and 16550 (`ttyS0`, 115200); the **physical** terminal remains
 **250000 8N1**, no flow control. This port has no native block or network
 backend and does not pass through GEM, RPU, storage or physical IMSIC files.

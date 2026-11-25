@@ -14,7 +14,12 @@ pub fn test(root: &Path) -> Result<()> {
     ensure!(status.success(), "workspace tests failed ({status})");
     Ok(())
 }
-pub fn board(root: &Path, board: &Board, features: Option<&str>) -> Result<PathBuf> {
+pub fn board(
+    root: &Path,
+    board: &Board,
+    features: Option<&str>,
+    no_default_features: bool,
+) -> Result<PathBuf> {
     for name in features.into_iter().flat_map(|set| set.split(',')) {
         ensure!(
             matches!(
@@ -24,7 +29,13 @@ pub fn board(root: &Path, board: &Board, features: Option<&str>) -> Result<PathB
             "unsupported board feature {name}"
         );
     }
-    let image = binary(root, &board.target, &board.name, features)?;
+    let image = binary(
+        root,
+        &board.target,
+        &board.name,
+        features,
+        no_default_features,
+    )?;
     let layout = elf::inspect(&image, board)?;
     println!(
         "{}: entry={:#x}, load={} B, RAM span={} B / {} B",
@@ -36,8 +47,17 @@ pub fn board(root: &Path, board: &Board, features: Option<&str>) -> Result<PathB
     );
     Ok(image)
 }
-pub fn binary(root: &Path, target: &str, package: &str, features: Option<&str>) -> Result<PathBuf> {
+pub fn binary(
+    root: &Path,
+    target: &str,
+    package: &str,
+    features: Option<&str>,
+    no_default_features: bool,
+) -> Result<PathBuf> {
     let mut command = target_build(root, target, package);
+    if no_default_features {
+        command.arg("--no-default-features");
+    }
     if let Some(features) = features {
         command.args(["--features", features]);
     }

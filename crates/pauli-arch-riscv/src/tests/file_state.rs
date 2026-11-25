@@ -7,7 +7,9 @@ use crate::aia::{
     registers::{EIE, EIP},
     virtualized::VirtualAia,
 };
+use pauli_config::ImsicIds;
 struct RegisterFile {
+    ids: ImsicIds,
     words: [usize; 256],
     opens: usize,
     closes: usize,
@@ -15,11 +17,23 @@ struct RegisterFile {
 }
 impl RegisterFile {
     fn new() -> Self {
+        Self::with_ids(ImsicIds::Ids255)
+    }
+    fn with_ids(ids: ImsicIds) -> Self {
         Self {
+            ids,
             words: [0; 256],
             opens: 0,
             closes: 0,
             writes: 0,
+        }
+    }
+    fn check(&self, select: usize) {
+        for base in [EIP, EIE] {
+            if (base..base + 2 * WORDS).contains(&select) {
+                assert_eq!((select - base) % 2, 0);
+                assert!((select - base) / 2 <= self.ids.max_id() / 64);
+            }
         }
     }
     fn open(&mut self) -> Window<'_> {
@@ -36,31 +50,87 @@ impl Drop for Window<'_> {
 }
 impl Registers for Window<'_> {
     fn read(&mut self, select: usize) -> usize {
+        self.0.check(select);
         self.0.words[select]
     }
     fn write(&mut self, select: usize, value: usize) {
+        self.0.check(select);
         self.0.writes += 1;
         self.0.words[select] = value;
     }
 }
 #[test]
+fn owner_files_require_a_successful_local_probe_and_matching_vm_size() {
+    use crate::aia::file_bank::OwnerFile;
+    use pauli_config::ImsicIds::{Ids127, Ids255};
+    let [primary, secondary] = [const { OwnerFile::new() }; 2];
+    assert!(!primary.acquire(Ids127));
+    primary.publish(Some(Ids127));
+    assert!(!secondary.acquire(Ids127));
+    secondary.publish(Some(Ids255));
+    assert!(!primary.acquire(Ids255));
+    assert!(!secondary.acquire(Ids127));
+    assert!(primary.acquire(Ids127));
+    assert!(!primary.acquire(Ids127));
+    assert!(secondary.acquire(Ids255));
+    primary.publish(Some(Ids127));
+    secondary.publish(Some(Ids255));
+    primary.publish(None); // Reprobing this hart failed before dispatch.
+    assert!(!primary.acquire(Ids127));
+    assert!(secondary.acquire(Ids255));
+}
+
+#[test]
 fn complete_bank_roundtrips_and_clears() {
-    for id in 1..=255 {
-        let mut regs = RegisterFile::new();
-        let mut file = File::new();
-        file.indirect(0xc0 + (id / 64) * 2, usize::MAX, 1 << (id % 64), true)
-            .unwrap();
-        file.indirect(0x70, usize::MAX, 1, true).unwrap();
-        file.inject(id);
-        file_state::load(&mut regs.open(), file);
-        let saved = file_state::save_clear(&mut regs.open());
-        assert_eq!(saved.top(), id);
-        assert!(saved.line());
-        assert!(regs.words.iter().all(|word| *word == 0));
-        file_state::load(&mut regs.open(), File::new());
-        assert_eq!(file_state::save_clear(&mut regs.open()).top(), 0);
+    for ids in [ImsicIds::Ids127, ImsicIds::Ids255] {
+        for id in 1..=ids.max_id() {
+            let mut regs = RegisterFile::with_ids(ids);
+            let mut file = File::with_ids(ids);
+            file.indirect(EIE + (id / 64) * 2, usize::MAX, 1 << (id % 64), true)
+                .unwrap();
+            file.indirect(0x70, usize::MAX, 1, true).unwrap();
+            file.inject(id);
+            file_state::load(&mut regs.open(), file);
+            let saved = file_state::save_clear(&mut regs.open(), ids);
+            assert_eq!(saved.ids(), ids);
+            assert_eq!(saved.top(), id);
+            assert!(saved.line());
+            assert!(regs.words.iter().all(|word| *word == 0));
+            file_state::load(&mut regs.open(), File::with_ids(ids));
+            assert_eq!(file_state::save_clear(&mut regs.open(), ids).top(), 0);
+        }
     }
 }
+#[test]
+fn narrow_file_retains_physical_threshold_and_ignores_reserved_bits() {
+    use crate::aia::registers::{EIDELIVERY, EITHRESHOLD};
+    let ids = ImsicIds::Ids127;
+    let mut regs = RegisterFile::with_ids(ids);
+    regs.words[EITHRESHOLD] = 129;
+    regs.words[EIDELIVERY] = 1;
+    regs.words[EIP] = 1;
+    regs.words[EIE] = 1;
+    regs.words[EIP + 2] = 1 << 63;
+    regs.words[EIE + 2] = 1 << 63;
+    let mut file = file_state::save_clear(&mut regs.open(), ids);
+    assert_eq!(file.indirect(EITHRESHOLD, 0, 0, false), Some(129));
+    assert_eq!(file.top(), 127);
+    assert!(file.line());
+    assert_eq!(file.indirect(EIP, 0, 0, false), Some(0));
+    assert_eq!(file.indirect(EIE, 0, 0, false), Some(0));
+    file_state::load(&mut regs.open(), file);
+    assert_eq!(regs.words[EITHRESHOLD], 129);
+    assert_eq!(file_state::save_clear(&mut regs.open(), ids), file);
+    let opens = regs.opens;
+    file_state::merge(ids, [1, 0, !0, !0], || regs.open());
+    assert_eq!(regs.opens, opens);
+    file_state::merge(ids, [1, 1 << 63, !0, !0], || regs.open());
+    assert_eq!(regs.opens, opens + 1);
+    assert_eq!(regs.words[EIP + 2], 1 << 63);
+    assert_eq!(regs.words[EIP + 4], 0);
+    assert_eq!(regs.words[EIP], 0);
+}
+
 #[test]
 fn merge_opens_one_window_only_for_nonempty_words() {
     // One bit is already pending, one overlaps, and one is new.
@@ -72,7 +142,7 @@ fn merge_opens_one_window_only_for_nonempty_words() {
             regs.words[EIP + 2 * word] = OLD;
             if mask & (1 << word) != 0 { INCOMING } else { 0 }
         });
-        file_state::merge(pending, || regs.open());
+        file_state::merge(ImsicIds::Ids255, pending, || regs.open());
         let windows = usize::from(mask != 0);
         assert_eq!(
             (regs.opens, regs.closes),
@@ -95,8 +165,8 @@ fn inbox_merge_survives_hardware_save_and_peer_restart() {
     file.indirect(EIE, 0, 1 << 37, true).unwrap();
     file_state::load(&mut regs.open(), file);
     vm.msi_access(0, Some(63));
-    file_state::merge(vm.take_pending(0), || regs.open());
-    file = file_state::save_clear(&mut regs.open());
+    file_state::merge(vm.ids(), vm.take_pending(0), || regs.open());
+    file = file_state::save_clear(&mut regs.open(), vm.ids());
     vm.msi_access(0, Some(255)); // Arrives after physical save, before put.
     peer.msi_access(0, Some(52));
     vm.put_file(0, file);
@@ -124,8 +194,8 @@ fn inbox_merge_survives_hardware_save_and_peer_restart() {
     // The replacement reuses the physical window, not the old VM's pending or enable bits.
     let mut next = VirtualAia::new(1);
     file_state::load(&mut regs.open(), next.take_file(0));
-    file_state::merge(next.take_pending(0), || regs.open());
-    let clean = file_state::save_clear(&mut regs.open());
+    file_state::merge(next.ids(), next.take_pending(0), || regs.open());
+    let clean = file_state::save_clear(&mut regs.open(), next.ids());
     assert_eq!(clean, File::new());
     next.put_file(0, clean);
 }

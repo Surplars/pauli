@@ -25,6 +25,7 @@ jobs:
           cargo xtask build --board qemu-virt-riscv --features selftest
       - name: Build valence board matrix
         run: |
+          cargo xtask build --board valence --no-default-features
           cargo xtask build --board valence
           cargo xtask build --board valence --features selftest
       - name: Run Linux tool and driver host tests
