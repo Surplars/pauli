@@ -238,7 +238,8 @@ static void provision(void)
 	RUN(0, "vm=3 epoch=21 template=2 name=child\n", "create", "service", "child");
 
 	create = (struct pauli_create){.template_id = 2, .epoch = 9, .vcpus = 255,
-		.memory_mib = 65535, .disk = 4, .name = "Ab_cd-1234567890"};
+		.memory_mib = 65535, .disk = 4};
+	memcpy(create.name, "Ab_cd-1234567890", sizeof(create.name));
 	expect(PAULI_CREATE, &create, &child, 0);
 	RUN(0, "vm=3 epoch=21 template=2 name=Ab_cd-1234567890\n", "create", "2", "Ab_cd-1234567890",
 	    "--disk", "3", "--epoch", "9", "--memory-mib", "65535", "--vcpus", "255");
