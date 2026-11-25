@@ -23,6 +23,8 @@ _Static_assert(sizeof(struct pauli_memory) == 16, "pauli_memory ABI");
 _Static_assert(sizeof(struct pauli_create) == 40, "pauli_create ABI");
 _Static_assert(sizeof(struct pauli_log) == 280, "pauli_log ABI");
 _Static_assert(sizeof(struct pauli_mail) == 20, "pauli_mail ABI");
+_Static_assert(sizeof(struct pauli_stats_header) == 32, "pauli_stats_header ABI");
+_Static_assert(sizeof(struct pauli_stats_owner) == 144, "pauli_stats_owner ABI");
 
 struct exchange {
 	unsigned long op;
@@ -77,7 +79,7 @@ static int fixture_sleep(clockid_t clock, int flags, const struct timespec *at, 
 
 static void check_stream(FILE *stream, const void *expected, size_t len)
 {
-	unsigned char actual[512];
+	unsigned char actual[4096];
 	rewind(stream);
 	assert(len < sizeof(actual));
 	assert(fread(actual, 1, sizeof(actual), stream) == len && feof(stream));
@@ -200,6 +202,76 @@ static void provision(void)
 	RUN(0, "vm=2 epoch=9 memory_bytes=18446744073709551615\n", "memory", "service");
 	expect(PAULI_MEMORY, &memory, NULL, EAGAIN);
 	RUN(EAGAIN, "", "memory", "service", "--epoch", "9");
+}
+
+static void stats_tests(void)
+{
+	const uint32_t flag = PAULI_STATS_TRAP_REDACTED;
+	struct pauli_stats_header hdr = {.version = 2, .host_cpus = 3, .sstc_owners = 5,
+		.exclusive_owners = 4, .flags = flag};
+	struct pauli_stats_owner first = {.owner = 0, .registered = 1, .flags = flag, .hart_id = 0,
+		.vm_exits = UINT64_MAX};
+	struct pauli_stats_owner hole = {.owner = 1, .flags = flag, .hart_id = UINT64_MAX};
+	struct pauli_stats_owner last = {.owner = 2, .registered = 1, .flags = flag,
+		.hart_id = UINT64_C(9007199254740993), .vm_exits = UINT64_MAX};
+	const struct pauli_stats_owner query[3] = {{.owner = 0}, {.owner = 1}, {.owner = 2}};
+
+#define ZERO_COUNTS " wfi_exits=0 sbi_timer_exits=0 sstc_timer_exits=0 mmio_exits=0" \
+	" other_exits=0 vtimer_irqs=0 ext_irqs=0 idle_wfi=0 mail_sends=0 mail_recvs=0\n"
+	expect(PAULI_STATS_HEADER, NULL, &hdr, 0);
+	expect(PAULI_STATS_OWNER, &query[0], &first, 0);
+	expect(PAULI_STATS_OWNER, &query[1], &hole, 0);
+	expect(PAULI_STATS_OWNER, &query[2], &last, 0);
+	RUN(0, "version=2 sample=live trap_redacted=1 host_cpus=3 sstc_owners=0x5 exclusive_owners=0x4\n"
+	    "owner=0 registered=1 hart_id=0 vm_exits=18446744073709551615" ZERO_COUNTS
+	    "owner=1 registered=0 hart_id=unregistered\n"
+	    "owner=2 registered=1 hart_id=9007199254740993 vm_exits=18446744073709551615" ZERO_COUNTS
+	    "totals vm_exits=36893488147419103230" ZERO_COUNTS, "stats");
+#undef ZERO_COUNTS
+
+#define ZERO_JSON ",\"wfi_exits\":\"0\",\"sbi_timer_exits\":\"0\",\"sstc_timer_exits\":\"0\"," \
+	"\"mmio_exits\":\"0\",\"other_exits\":\"0\",\"vtimer_irqs\":\"0\",\"ext_irqs\":\"0\"," \
+	"\"idle_wfi\":\"0\",\"mail_sends\":\"0\",\"mail_recvs\":\"0\""
+#define JSON_HEADER "{\"version\":2,\"sample\":\"live\",\"trap_redacted\":true," \
+	"\"host_cpus\":3,\"sstc_owners\":\"0x5\",\"exclusive_owners\":\"0x4\",\"owners\":["
+	expect(PAULI_STATS_HEADER, NULL, &hdr, 0);
+	expect(PAULI_STATS_OWNER, &query[1], &hole, 0);
+	RUN(0, JSON_HEADER "{\"owner\":1,\"registered\":false,\"hart_id\":null}],"
+	    "\"totals\":{\"vm_exits\":\"0\"" ZERO_JSON "}}\n", "stats", "--owner", "1", "--json");
+	expect(PAULI_STATS_HEADER, NULL, &hdr, 0);
+	expect(PAULI_STATS_OWNER, &query[2], &last, 0);
+	RUN(0, JSON_HEADER "{\"owner\":2,\"registered\":true,\"hart_id\":\"9007199254740993\","
+	    "\"vm_exits\":\"18446744073709551615\"" ZERO_JSON "}],"
+	    "\"totals\":{\"vm_exits\":\"18446744073709551615\"" ZERO_JSON "}}\n",
+	    "stats", "--json", "--owner", "2");
+#undef JSON_HEADER
+#undef ZERO_JSON
+
+	expect(PAULI_STATS_HEADER, NULL, &hdr, 0);
+	RUN(EINVAL, "", "stats", "--owner", "63");
+	for (size_t i = 0; i < 3; i++) {
+		const int errors[] = {ENOTTY, EACCES, EOPNOTSUPP};
+		expect(PAULI_STATS_HEADER, NULL, NULL, errors[i]);
+		RUN(errors[i], "", "stats");
+	}
+	expect(PAULI_STATS_HEADER, NULL, &hdr, 0);
+	expect(PAULI_STATS_OWNER, &query[0], &first, 0);
+	expect(PAULI_STATS_OWNER, &query[1], NULL, EACCES);
+	RUN(EACCES, "", "stats", "--json");
+	first.last_sepc = 1;
+	expect(PAULI_STATS_HEADER, NULL, &hdr, 0);
+	expect(PAULI_STATS_OWNER, &query[0], &first, 0);
+	RUN(EPROTO, "", "stats", "--owner", "0");
+	hdr.host_cpus = 65;
+	expect(PAULI_STATS_HEADER, NULL, &hdr, 0);
+	RUN(EPROTO, "", "stats");
+	INVALID("stats", "service");
+	INVALID("stats", "--epoch", "1");
+	INVALID("stats", "--owner");
+	INVALID("stats", "--owner", "64");
+	INVALID("stats", "--owner", "-1");
+	INVALID("stats", "--owner", "0", "--owner", "0");
+	INVALID("stats", "--json", "--json");
 }
 
 static void stop_wait(void)
@@ -468,6 +540,7 @@ int main(void)
 	INVALID("recv", "2", "abc");
 	INVALID("logs", "2", "--epoch", "0");
 	legacy_and_list();
+	stats_tests();
 	provision();
 	stop_wait();
 	logs();
@@ -475,6 +548,7 @@ int main(void)
 	recv_mail_tests();
 	puts("PASS: legacy output, visible list, epoch binding, create/disk shapes, exact memory, stop waits and no mutation retry");
 	puts("PASS: binary logs, cursor recovery, epoch changes and bounded follow");
+	puts("PASS: live stats, redaction, sparse owners, lossless JSON, wide totals and compatibility errors");
 	puts("PASS: tagged text/hex mail, bound and inspected epochs, raw/structured receive, bounded wait and no duplicate dequeue");
 	return 0;
 }

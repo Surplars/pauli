@@ -5,7 +5,7 @@
 //! Ownership/Lock Ordering: caller serializes this queue; release before effects.
 //! Invariants: channel generations reject completions from a cancelled/reused slot.
 //! Lifecycle: Empty -> Queued -> Executing -> Done -> Empty; cancel any -> Empty.
-use crate::{Request, abi::Return};
+use crate::{Call, abi::Return};
 /// Limit simultaneous control calls, not the VM or vCPU identities that may call.
 pub const MAX_PENDING: usize = 16;
 
@@ -24,7 +24,7 @@ impl Ticket {
 pub struct Work {
     pub ticket: Ticket,
     pub source: u32,
-    pub request: Request,
+    pub request: Call,
 }
 #[derive(Clone, Copy)]
 enum Phase {
@@ -67,7 +67,7 @@ impl Queue {
         &mut self,
         channel: usize,
         source: u32,
-        request: Request,
+        request: impl Into<Call>,
     ) -> Result<Ticket, Error> {
         if source == 0 {
             return Err(Error::Invalid);
@@ -95,7 +95,7 @@ impl Queue {
             work: Work {
                 ticket,
                 source,
-                request,
+                request: request.into(),
             },
             phase: Phase::Queued,
         });
@@ -142,9 +142,9 @@ impl Queue {
             return (Poll::Cancelled, None);
         };
         if let Phase::Done(result) = slot.phase {
-            let operation = slot.work.request.operation;
+            let operation = slot.work.request.vm_operation();
             self.slots[ticket.index] = None;
-            (Poll::Complete(result), Some(operation))
+            (Poll::Complete(result), operation)
         } else {
             (Poll::Pending, None)
         }

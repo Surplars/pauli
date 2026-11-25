@@ -10,6 +10,8 @@ struct Runtime {
     vms: [Option<Info>; 4],
     next_epoch: u32,
     reads: Cell<usize>,
+    stats_word: Cell<Option<StatsWord>>,
+    stats_result: Cell<Result<u64, Error>>,
     log_read: Cell<Option<(VmId, u32, u64)>>,
     mail_call: Cell<Option<mail::Exchange>>,
     mail_result: Cell<Result<MailChunk, Error>>,
@@ -31,6 +33,8 @@ impl Runtime {
             }),
             next_epoch: 14,
             reads: Cell::new(0),
+            stats_word: Cell::new(None),
+            stats_result: Cell::new(Ok(u64::MAX)),
             log_read: Cell::new(None),
             mail_call: Cell::new(None),
             mail_result: Cell::new(Ok(MailChunk {
@@ -57,6 +61,10 @@ impl Backend for Runtime {
             .copied()
             .flatten()
             .ok_or(Error::NotFound)
+    }
+    fn stats_read(&self, word: StatsWord) -> Result<u64, Error> {
+        self.stats_word.set(Some(word));
+        self.stats_result.get()
     }
     fn start(&mut self, vm: VmId) -> Result<bool, Error> {
         self.effects.push((vm, Operation::Start));
@@ -132,4 +140,5 @@ mod logs;
 mod mail;
 mod policy;
 mod scale;
+mod stats;
 mod transport;

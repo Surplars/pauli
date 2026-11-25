@@ -25,10 +25,10 @@ BUILD = ["build", "--offline", "--locked", "--release", "--target", TARGET, "-p"
 # Drop the guard BEFORE error cleanup, which may acquire this same mailbox.
 REPLACEMENTS = [
     ("""                slot.mailbox.lock().post_ipi();
-                if A::Smp::kick(slot.owner).is_err() {""",
+                if Self::kick_posted(vm, slot).is_err() {""",
      """                let mailbox = slot.mailbox.lock();
                 mailbox.post_ipi();
-                let notified = A::Smp::kick(slot.owner);
+                let notified = Self::kick_posted(vm, slot);
                 drop(mailbox);
                 if notified.is_err() {"""),
     ("""                    let ticket = target.mailbox.lock().post_fence(instruction, current.index);

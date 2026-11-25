@@ -17,6 +17,8 @@ mod boot_grant;
 mod boot_quota;
 #[cfg(feature = "guest-control")]
 mod mail;
+#[cfg(feature = "guest-control")]
+mod stats;
 
 #[test]
 fn command_grammar_is_exact() {

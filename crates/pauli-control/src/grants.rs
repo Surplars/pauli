@@ -12,8 +12,22 @@ pub(super) struct Grant {
     /// to the configured resource across a cold restart.
     pub target_epoch: u32,
 }
+#[derive(Clone, Copy)]
+pub(super) enum Entry {
+    Vm(Grant),
+    HostStats(u32),
+}
+impl Entry {
+    /// A host grant has no target VM and cannot match a VM-scoped grant.
+    pub(super) fn key(self) -> (u32, Option<VmId>) {
+        match self {
+            Self::Vm(g) => (g.source, Some(g.vm)),
+            Self::HostStats(source) => (source, None),
+        }
+    }
+}
 pub struct GrantPage {
-    entries: [Option<Grant>; PER_PAGE],
+    entries: [Option<Entry>; PER_PAGE],
     next: Option<&'static mut GrantPage>,
 }
 impl GrantPage {
@@ -23,13 +37,19 @@ impl GrantPage {
             next: None,
         }
     }
-    pub(super) fn get(&self, source: u32, vm: VmId) -> Option<Grant> {
+    pub(super) fn get(&self, source: u32, vm: Option<VmId>) -> Option<Entry> {
         core::iter::successors(Some(self), |p| p.next.as_deref())
             .flat_map(|p| p.entries.iter().flatten())
-            .find(|g| g.source == source && g.vm == vm)
+            .find(|entry| entry.key() == (source, vm))
             .copied()
     }
-    fn entries_mut(&mut self) -> impl Iterator<Item = &mut Option<Grant>> {
+    pub(super) fn vm_grant(&self, source: u32, vm: VmId) -> Option<Grant> {
+        match self.get(source, Some(vm))? {
+            Entry::Vm(g) => Some(g),
+            Entry::HostStats(_) => None,
+        }
+    }
+    fn entries_mut(&mut self) -> impl Iterator<Item = &mut Option<Entry>> {
         let mut next = Some(self);
         core::iter::from_fn(move || {
             let page = next.take()?;
@@ -38,11 +58,11 @@ impl GrantPage {
         })
         .flatten()
     }
-    pub(super) fn set(&mut self, grant: Grant, backend: &impl Backend) -> Result<(), Error> {
+    pub(super) fn set(&mut self, grant: Entry, backend: &impl Backend) -> Result<(), Error> {
         if let Some(old) = self
             .entries_mut()
             .flatten()
-            .find(|g| g.source == grant.source && g.vm == grant.vm)
+            .find(|entry| entry.key() == grant.key())
         {
             *old = grant;
             return Ok(());
@@ -50,7 +70,7 @@ impl GrantPage {
         *self.vacant(backend)? = Some(grant);
         Ok(())
     }
-    pub(super) fn vacant(&mut self, backend: &impl Backend) -> Result<&mut Option<Grant>, Error> {
+    pub(super) fn vacant(&mut self, backend: &impl Backend) -> Result<&mut Option<Entry>, Error> {
         let mut page = self;
         loop {
             if let Some(i) = page.entries.iter().position(Option::is_none) {
@@ -62,7 +82,7 @@ impl GrantPage {
             };
         }
     }
-    pub(super) fn remove(&mut self, matches: impl Fn(Grant) -> bool) {
+    pub(super) fn remove(&mut self, matches: impl Fn(Entry) -> bool) {
         for entry in self.entries_mut() {
             if entry.is_some_and(&matches) {
                 *entry = None;

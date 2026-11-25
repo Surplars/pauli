@@ -50,7 +50,9 @@ static struct {
 	unsigned int ecalls, reads, writes;
 	unsigned long words[8];
 	struct sbiret reply;
+	struct sbiret features;
 	struct sbiret (*log_reply)(unsigned long cursor);
+	struct sbiret (*stats_reply)(unsigned long selector);
 } mock;
 static struct miscdevice *registered;
 static int sbi_present = 1;
@@ -88,6 +90,15 @@ static struct sbiret sbi_ecall(unsigned long eid, unsigned long fid, unsigned lo
 	unsigned long words[] = {eid, fid, a0, a1, a2, a3, a4, a5};
 	++mock.ecalls;
 	memcpy(mock.words, words, sizeof(words));
+	if (fid == 0 || fid == 2) {
+		assert(eid == 0x08004f49 && !(a0 | a1 | a2 | a3 | a4 | a5));
+		return fid == 0 ? mock.reply : mock.features;
+	}
+	if (mock.stats_reply) {
+		assert(eid == 0x08004f49 && fid == 1 && a0 == 1 && a1 == 11);
+		assert(!(a2 | a4 | a5));
+		return mock.stats_reply(a3);
+	}
 	if (mock.log_reply) {
 		assert(eid == 0x08004f49 && fid == 1 && a0 == 1 && a1 == 8);
 		assert(a2 == 2 && a3 == 7 && a5 == 0);
@@ -122,6 +133,10 @@ static_assert(PAULI_DESTROY == 0xc00c5074U && PAULI_CREATE == 0xc0285075U);
 static_assert(PAULI_MEMORY == 0xc0105076U);
 static_assert(PAULI_LOG_READ == 0xc1185077U && sizeof(struct pauli_log) == 280);
 static_assert(PAULI_MAIL_SEND == 0x40145078U && PAULI_MAIL_RECV == 0xc0145079U);
+static_assert(PAULI_STATS_HEADER == 0x8020507aU && sizeof(struct pauli_stats_header) == 32);
+static_assert(PAULI_STATS_OWNER == 0xc090507bU && sizeof(struct pauli_stats_owner) == 144);
+static_assert(offsetof(struct pauli_stats_owner, last_scause) == 88);
+static_assert(offsetof(struct pauli_stats_owner, idle_wfi) == 112);
 static_assert(sizeof(struct pauli_info) == 8 && sizeof(struct pauli_vm) == 12);
 static_assert(offsetof(struct pauli_vm, changed) == 11);
 static_assert(sizeof(struct pauli_create) == 40 && offsetof(struct pauli_create, epoch) == 4);
@@ -149,7 +164,7 @@ static void rejected(unsigned int cmd, void *input)
 }
 static void probe(void)
 {
-	const unsigned long expected[] = {0x08004f49, 0, 0, 0, 0, 0, 0, 0};
+	const unsigned long expected[] = {0x08004f49, 2, 0, 0, 0, 0, 0, 0};
 	sbi_present = 0;
 	assert(hv_init() == -ENODEV && !registered && !mock.ecalls);
 	sbi_present = 1;
@@ -158,6 +173,7 @@ static void probe(void)
 	mock.reply.value = 1ULL << 32;
 	assert(hv_init() == -EPROTONOSUPPORT && !registered);
 	mock.reply.value |= 8;
+	mock.features.value = 1;
 	assert(hv_init() == 0 && registered && registered->mode == 0600);
 	assert(!strcmp(registered->name, "pauli") && registered->fops->compat_ioctl == compat_ptr_ioctl);
 	assert(!memcmp(mock.words, expected, sizeof(expected)));
@@ -166,7 +182,7 @@ static void permissions_and_info(void)
 {
 	const unsigned int cmds[] = {PAULI_INFO, PAULI_INSPECT, PAULI_START, PAULI_STOP,
 				     PAULI_DESTROY, PAULI_CREATE, PAULI_MEMORY, PAULI_LOG_READ,
-				     PAULI_MAIL_SEND, PAULI_MAIL_RECV};
+				     PAULI_MAIL_SEND, PAULI_MAIL_RECV, PAULI_STATS_HEADER, PAULI_STATS_OWNER};
 	struct pauli_info info;
 	for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); ++i) {
 		assert(call(cmds[i], NULL) == -EPERM);
@@ -469,6 +485,120 @@ static void errors_and_copy_faults(void)
 	assert(call(PAULI_INFO, &info) == -EFAULT && !mock.ecalls && mock.writes == 1);
 	mock.write_fault = false;
 }
+
+static u64 stats_header_words[] = {0x5041554c49535431ULL, 2, 64, 128, 64,
+				   1ULL << 63 | 1, 1ULL << 63, 0};
+static unsigned int stats_owner, stats_section, stats_fail_call;
+static long stats_error;
+static u64 stats_hart = 0xf000000000000201ULL;
+
+static struct sbiret stats_word(unsigned long selector)
+{
+	unsigned int word = mock.ecalls - 1;
+	u64 prefix = 0x8001000200030000ULL;
+
+	assert(selector == (stats_section | (u64)stats_owner << 8 | (u64)word << 16));
+	assert(word < (stats_section ? 16U : 8U));
+	if (mock.ecalls == stats_fail_call)
+		return (struct sbiret){stats_error, 0};
+	if (!stats_section)
+		return (struct sbiret){0, stats_header_words[word]};
+	/* Poison the redacted and reserved words too, to check driver copyout. */
+	return (struct sbiret){0, word ? prefix + word : stats_hart};
+}
+
+static void stats(void)
+{
+	struct pauli_stats_header header;
+	struct pauli_stats_owner owner;
+	const u64 base = 0x8001000200030000ULL;
+	const struct { unsigned int word; u64 value; } invalid[] = {
+		{0, 0}, {1, 1}, {2, 128}, {3, 64}, {4, 0}, {4, 65}, {4, 63}, {7, 1}
+	};
+
+	mock.stats_reply = stats_word;
+	memset(&header, 0xaa, sizeof(header));
+	assert(call(PAULI_STATS_HEADER, &header) == 0 && mock.ecalls == 8 && !mock.reads);
+	assert(header.version == 2 && header.host_cpus == 64);
+	assert(header.sstc_owners == (1ULL << 63 | 1) && header.exclusive_owners == 1ULL << 63);
+	assert(header.flags == PAULI_STATS_TRAP_REDACTED && !header.reserved);
+	for (size_t i = 0; i < sizeof(invalid)/sizeof(invalid[0]); i++) {
+		unsigned int word = invalid[i].word;
+		u64 saved = stats_header_words[word];
+		stats_header_words[word] = invalid[i].value;
+		assert(call(PAULI_STATS_HEADER, &header) == -EIO && !mock.writes);
+		stats_header_words[word] = saved;
+	}
+	/* An authorized caller can find collection disabled, despite FID 2 support. */
+	stats_fail_call = 1;
+	stats_error = SBI_ERR_NOT_SUPPORTED;
+	assert(call(PAULI_STATS_HEADER, &header) == -EOPNOTSUPP && mock.ecalls == 1 && !mock.writes);
+	stats_fail_call = 8;
+	stats_error = SBI_ERR_DENIED;
+	assert(call(PAULI_STATS_HEADER, &header) == -EACCES && mock.ecalls == 8 && !mock.writes);
+	stats_fail_call = 0;
+	mock.write_fault = true;
+	assert(call(PAULI_STATS_HEADER, &header) == -EFAULT && mock.ecalls == 8 && mock.writes == 1);
+	mock.write_fault = false;
+
+	stats_section = 1;
+	stats_owner = 63;
+	memset(&owner, 0xcc, sizeof(owner));
+	owner.owner = stats_owner;
+	assert(call(PAULI_STATS_OWNER, &owner) == 0 && mock.ecalls == 16 && mock.reads == 1);
+	assert(owner.owner == 63 && owner.registered == 1 && owner.hart_id == stats_hart);
+	assert(owner.flags == PAULI_STATS_TRAP_REDACTED && !owner.pad && !owner.reserved);
+	assert(owner.vm_exits == base + 1 && owner.wfi_exits == base + 2);
+	assert(owner.sbi_timer_exits == base + 3 && owner.sstc_timer_exits == base + 4);
+	assert(owner.mmio_exits == base + 5 && owner.other_exits == base + 6);
+	assert(owner.vtimer_irqs == base + 7 && owner.ext_irqs == base + 8);
+	assert(!owner.last_scause && !owner.last_sepc && !owner.last_stval);
+	assert(owner.idle_wfi == base + 12 && owner.mail_sends == base + 13 && owner.mail_recvs == base + 14);
+	stats_hart = ~0ULL;
+	assert(call(PAULI_STATS_OWNER, &owner) == 0 && !owner.registered && owner.hart_id == ~0ULL);
+	owner.owner = 64;
+	rejected(PAULI_STATS_OWNER, &owner);
+	owner.owner = ~0U;
+	rejected(PAULI_STATS_OWNER, &owner);
+	owner.owner = stats_owner;
+	mock.read_fault = true;
+	assert(call(PAULI_STATS_OWNER, &owner) == -EFAULT && !mock.ecalls && !mock.writes);
+	mock.read_fault = false;
+	stats_error = SBI_ERR_INVALID_PARAM; /* Below 64, beyond this host's topology. */
+	stats_fail_call = 1;
+	assert(call(PAULI_STATS_OWNER, &owner) == -EINVAL && mock.ecalls == 1 && !mock.writes);
+	stats_error = SBI_ERR_INVALID_STATE;
+	stats_fail_call = 16;
+	assert(call(PAULI_STATS_OWNER, &owner) == -EAGAIN && mock.ecalls == 16 && !mock.writes);
+	stats_fail_call = 0;
+	mock.write_fault = true;
+	assert(call(PAULI_STATS_OWNER, &owner) == -EFAULT && mock.ecalls == 16 && mock.writes == 1);
+	mock.write_fault = false;
+	mock.stats_reply = NULL;
+}
+
+static void optional_features(void)
+{
+	const struct { struct sbiret fid2; int error; } cases[] = {
+		{{SBI_ERR_NOT_SUPPORTED, 0}, EOPNOTSUPP}, /* Old hypervisor. */
+		{{0, 0}, EOPNOTSUPP}, {{0, 2}, EOPNOTSUPP}, {{SBI_ERR_FAILED, 0}, EIO}
+	};
+	struct pauli_info info;
+	for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
+		struct pauli_vm vm = {.id = 1};
+		hv_exit();
+		mock.reply = (struct sbiret){0, 1ULL << 32 | 8};
+		mock.features = cases[i].fid2;
+		assert(!hv_init() && registered);
+		assert(call(PAULI_STATS_HEADER, NULL) == -cases[i].error && !mock.ecalls && !mock.writes);
+		assert(call(PAULI_STATS_OWNER, NULL) == -cases[i].error && !mock.ecalls && !mock.reads);
+		assert(!call(PAULI_INFO, &info) && info.version == 1 && info.max_id == 8);
+		mock.reply.value = 7 | (u64)PAULI_READY << 32;
+		assert(!call(PAULI_INSPECT, &vm) && vm.epoch == 7 && vm.state == PAULI_READY);
+		check_wire(OP_INSPECT, 1, 0, 0, 0);
+	}
+}
+
 int main(void)
 {
 	probe();
@@ -480,8 +610,10 @@ int main(void)
 	logs();
 	mail();
 	errors_and_copy_faults();
+	stats();
+	optional_features();
 	hv_exit();
 	assert(!registered);
-	puts("PASS: Pauli driver probe, ioctl ABI, SBI words and replies, log chunks, mailbox records, validation, credentials and copy faults");
+	puts("PASS: Pauli driver probe, ioctl ABI, SBI words and replies, log chunks, mailbox records, stats and redaction, validation, credentials and copy faults");
 	return 0;
 }

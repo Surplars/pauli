@@ -16,11 +16,17 @@
 #define PAULI_SBI_EID	0x08004f49
 #define PAULI_ABI	1
 #define PAULI_DISK_SLOTS	4	/* pauli_control::DiskSlot::COUNT */
+#define PAULI_FEATURE_STATS	BIT_ULL(0)
+#define STATS_MAGIC		0x5041554c49535431ULL
+#define STATS_MAX_OWNERS	64
+#define STATS_HEADER_WORDS	8
+#define STATS_OWNER_WORDS	16
 
 enum pauli_sbi_op {
 	OP_INSPECT = 0, OP_START = 1, OP_STOP = 2, OP_CREATE = 3,
 	OP_DESTROY = 4, OP_CREATE_SHAPED = 5, OP_MEMORY_BYTES = 6,
 	OP_CREATE_DISK = 7, OP_CONSOLE_READ = 8, OP_MAIL_SEND = 9, OP_MAIL_RECV = 10,
+	OP_STATS_WORD = 11,
 };
 
 /* Status layout shared with pauli-control/src/abi.rs. */
@@ -43,6 +49,7 @@ enum pauli_sbi_op {
 #define MAIL_TAG	GENMASK_ULL(60, 53)
 
 static struct pauli_info hv_info;
+static int stats_probe_error;
 
 static int hv_errno(long err)
 {
@@ -230,6 +237,78 @@ static long hv_mail(void __user *arg, unsigned int op)
 	return copy_to_user(arg, &req, sizeof(req)) ? -EFAULT : 0;
 }
 
+/* FID 1 op 11 authorizes each read against the currently calling VM. */
+static int hv_stats_words(unsigned int section, u32 owner, u64 *words, unsigned int count)
+{
+	unsigned int i;
+
+	for (i = 0; i < count; i++) {
+		u64 selector = section | ((u64)owner << 8) | ((u64)i << 16);
+		struct sbiret ret = hv_call(OP_STATS_WORD, 0, selector, 0, 0);
+
+		if (ret.error)
+			return hv_errno(ret.error);
+		words[i] = (u64)ret.value;
+	}
+	return 0;
+}
+
+static long hv_stats_header(void __user *arg)
+{
+	struct pauli_stats_header header = { .flags = PAULI_STATS_TRAP_REDACTED };
+	u64 words[STATS_HEADER_WORDS];
+	int err;
+
+	if (stats_probe_error)
+		return stats_probe_error;
+	err = hv_stats_words(0, 0, words, STATS_HEADER_WORDS);
+	if (err)
+		return err;
+	if (words[0] != STATS_MAGIC || words[1] != 2 ||
+	    words[2] != sizeof(words) || words[3] != STATS_OWNER_WORDS * sizeof(u64) ||
+	    !words[4] || words[4] > STATS_MAX_OWNERS || words[7])
+		return -EIO;
+	if (words[4] < STATS_MAX_OWNERS && ((words[5] | words[6]) >> words[4]))
+		return -EIO;
+	header.version = words[1];
+	header.host_cpus = words[4];
+	header.sstc_owners = words[5];
+	header.exclusive_owners = words[6];
+	return copy_to_user(arg, &header, sizeof(header)) ? -EFAULT : 0;
+}
+
+static long hv_stats_owner(void __user *arg)
+{
+	struct pauli_stats_owner out = { .flags = PAULI_STATS_TRAP_REDACTED };
+	u64 words[STATS_OWNER_WORDS];
+	int err;
+
+	if (stats_probe_error)
+		return stats_probe_error;
+	if (copy_from_user(&out.owner, arg, sizeof(out.owner)))
+		return -EFAULT;
+	if (out.owner >= STATS_MAX_OWNERS)
+		return -EINVAL;
+	err = hv_stats_words(1, out.owner, words, STATS_OWNER_WORDS);
+	if (err)
+		return err;
+	out.hart_id = words[0];
+	out.registered = out.hart_id != ~0ULL;
+	out.vm_exits = words[1];
+	out.wfi_exits = words[2];
+	out.sbi_timer_exits = words[3];
+	out.sstc_timer_exits = words[4];
+	out.mmio_exits = words[5];
+	out.other_exits = words[6];
+	out.vtimer_irqs = words[7];
+	out.ext_irqs = words[8];
+	/* Trap context and reserved words stay zero even on a malformed reply. */
+	out.idle_wfi = words[12];
+	out.mail_sends = words[13];
+	out.mail_recvs = words[14];
+	return copy_to_user(arg, &out, sizeof(out)) ? -EFAULT : 0;
+}
+
 static long hv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	void __user *out = (void __user *)arg;
@@ -270,6 +349,10 @@ static long hv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return hv_mail(out, OP_MAIL_SEND);
 	case PAULI_MAIL_RECV:
 		return hv_mail(out, OP_MAIL_RECV);
+	case PAULI_STATS_HEADER:
+		return hv_stats_header(out);
+	case PAULI_STATS_OWNER:
+		return hv_stats_owner(out);
 	default:
 		return -ENOTTY;
 	}
@@ -334,6 +417,12 @@ static int __init hv_init(void)
 	static_assert(offsetof(struct pauli_mail, len) == 9);
 	static_assert(offsetof(struct pauli_mail, flags) == 10);
 	static_assert(offsetof(struct pauli_mail, data) == 12);
+	static_assert(sizeof(struct pauli_stats_header) == 32);
+	static_assert(offsetof(struct pauli_stats_header, sstc_owners) == 8);
+	static_assert(offsetof(struct pauli_stats_header, flags) == 24);
+	static_assert(sizeof(struct pauli_stats_owner) == 144);
+	static_assert(offsetof(struct pauli_stats_owner, hart_id) == 16);
+	static_assert(offsetof(struct pauli_stats_owner, reserved) == 136);
 	if (sbi_probe_extension(PAULI_SBI_EID) <= 0)
 		return -ENODEV;
 	ret = sbi_ecall(PAULI_SBI_EID, 0, 0, 0, 0, 0, 0, 0);
@@ -343,6 +432,11 @@ static int __init hv_init(void)
 		return -EPROTONOSUPPORT;
 	hv_info.version = PAULI_ABI;
 	hv_info.max_id = (u32)ret.value;
+	/* Optional feature discovery cannot prevent registration on an older HS. */
+	ret = sbi_ecall(PAULI_SBI_EID, 2, 0, 0, 0, 0, 0, 0);
+	stats_probe_error = hv_errno(ret.error);
+	if (!stats_probe_error && !(ret.value & PAULI_FEATURE_STATS))
+		stats_probe_error = -EOPNOTSUPP;
 	return misc_register(&hv_device);
 }
 

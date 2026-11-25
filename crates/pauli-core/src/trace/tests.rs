@@ -70,6 +70,32 @@ fn debugger_wire_offsets_and_unregistered_owner_values() {
 }
 
 #[test]
+fn online_fields_match_v2_and_hide_native_trap_words() {
+    use pauli_control::{Error, StatsWord};
+    let stats = HsStats::new();
+    stats.init_host(2, 2);
+    stats.register_owner(0, 123, true);
+    stats.reserved.store(u64::MAX, Relaxed);
+    let read =
+        |section, owner, word| stats.public_word(StatsWord::new(section, owner, word).unwrap());
+    let header = core::array::from_fn(|i| read(0, 0, i as u8).unwrap());
+    assert_eq!(header, [HS_STATS_MAGIC, 2, 64, 128, 2, 1, 2, 0]);
+    assert_eq!(read(1, 1, 0), Ok(UNREGISTERED_HART));
+    for (i, field) in words(&stats.owners[0]).into_iter().enumerate() {
+        let distinctive = 0xfedc_ba98_0000_0000 | i as u64;
+        field.store(distinctive, Relaxed);
+        let exposed = !matches!(i, 9..=11 | 15);
+        assert_eq!(
+            read(1, 0, i as u8),
+            Ok(if exposed { distinctive } else { 0 })
+        );
+        for absent in [2, 63] {
+            assert_eq!(read(1, absent, i as u8), Err(Error::Invalid));
+        }
+    }
+}
+
+#[test]
 fn independent_harts_record_exit_buckets_snapshots_and_completion_counts() {
     let stats = HsStats::new();
     let upper = MAX_CPUS - 1;

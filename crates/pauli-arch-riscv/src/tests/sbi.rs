@@ -69,6 +69,27 @@ fn management_probe_defers_to_the_board_capacity_without_consuming_the_pc() {
     );
 }
 #[test]
+fn management_features_reports_protocol_only_and_requires_six_zero_arguments() {
+    for nonzero in [None, Some(0), Some(1), Some(2), Some(3), Some(4), Some(5)] {
+        let mut ctx = call(0x0800_4f49, 2, [0; 3]);
+        if let Some(i) = nonzero {
+            ctx.x[10 + i] = usize::MAX;
+        }
+        let trap = exit(&ctx);
+        assert_eq!(sbi::handle_ecall(&mut ctx, trap), Ok(SbiAction::Resume));
+        let expected = if !cfg!(feature = "guest-control") {
+            (sbi::NOT_SUPPORTED as usize, 0)
+        } else if nonzero.is_some() {
+            (sbi::INVALID_PARAM as usize, 0)
+        } else {
+            (0, 1)
+        };
+        assert_eq!((ctx.x[10], ctx.x[11]), expected);
+        assert_eq!(ctx.pc, trap.pc + 4);
+    }
+}
+
+#[test]
 fn time_and_rejection_commit_once() {
     let mut ctx = call(sbi::TIME, 0, [usize::MAX, 99, 0]);
     let trap = exit(&ctx);

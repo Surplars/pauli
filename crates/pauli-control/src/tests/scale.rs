@@ -192,3 +192,47 @@ fn full_or_failed_grant_expansion_never_leaves_an_unmanageable_child() {
     assert_eq!(b.creates, 2 * grants::PER_PAGE - 1);
     assert_eq!(s.list(Caller::Guest(1), &b).count(), b.creates);
 }
+
+#[test]
+fn creator_stats_authority_never_transfers_to_children_or_slot_replacements() {
+    let mut b = Domains::new(0);
+    let mut s = Service::new();
+    s.grant(Caller::Host, 1, VmId(2), Rights::CREATE, &b)
+        .unwrap();
+    s.grant_stats(Caller::Host, 1, &b).unwrap();
+    let call = Call::StatsRead(StatsWord::new(0, 0, 0).unwrap());
+    let child = create(&mut s, &mut b).unwrap();
+    let slot = child.vm.0 as usize - 1;
+    b.entries[slot] = Some(row(child.vm.0, child.epoch, true));
+    let caller = Caller::Guest(child.epoch);
+    assert_eq!(
+        s.execute_call(caller, call, &mut b),
+        abi::Return::error(abi::DENIED)
+    );
+    // This backend has no collector, so NOT_SUPPORTED distinguishes an actual grant.
+    s.grant_stats(Caller::Host, child.epoch, &b).unwrap();
+    assert_eq!(
+        s.execute_call(caller, call, &mut b),
+        abi::Return::error(abi::NOT_SUPPORTED)
+    );
+    b.entries[slot] = Some(child);
+    s.execute(
+        Caller::Guest(1),
+        request(child.vm.0, child.epoch, Operation::Destroy),
+        &mut b,
+    )
+    .unwrap();
+    assert!(s.grants.get(child.epoch, None).is_none());
+    assert_eq!(
+        s.execute_call(Caller::Guest(1), call, &mut b),
+        abi::Return::error(abi::NOT_SUPPORTED)
+    );
+    let next = create(&mut s, &mut b).unwrap();
+    assert_eq!(next.vm, child.vm);
+    assert_ne!(next.epoch, child.epoch);
+    b.entries[slot] = Some(row(next.vm.0, next.epoch, true));
+    assert_eq!(
+        s.execute_call(Caller::Guest(next.epoch), call, &mut b),
+        abi::Return::error(abi::DENIED)
+    );
+}

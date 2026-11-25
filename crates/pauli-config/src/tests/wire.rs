@@ -5,6 +5,49 @@
 use super::*;
 
 #[test]
+fn host_stats_requires_an_explicit_linux_management_boot_slot() {
+    let mut cfg = fixture();
+    cfg.smoke_payload = false;
+    cfg.vms[0] = Some(cfg.vms[0].unwrap().renamed("manager").unwrap());
+    let mut raw = cfg.encode().unwrap();
+    assert!(!BootConfig::decode(&raw).unwrap().boot_stats_for(0));
+    raw[crate::HEADER + 73] |= 0x10;
+    cfg.vms[0].as_mut().unwrap().host_stats = true;
+    assert_eq!(cfg.encode().unwrap(), raw);
+    let decoded = BootConfig::decode(&raw).unwrap();
+    assert!(decoded.boot_stats_for(0));
+    for slot in [1, 2, 3, 4, usize::MAX] {
+        assert!(!decoded.boot_stats_for(slot));
+    }
+    assert!(!decoded.vms[0].unwrap().renamed("clone").unwrap().host_stats);
+
+    for mutate in [
+        (|cfg: &mut BootConfig| cfg.smoke_payload = true) as fn(&mut BootConfig),
+        |cfg| {
+            cfg.vms[1..].fill(None);
+            cfg.management = false;
+        },
+        |cfg| {
+            cfg.vms[0].as_mut().unwrap().firmware = Some(crate::FirmwareLayout {
+                rx_pages: 1,
+                ro_pages: 0,
+            })
+        },
+        |cfg| cfg.vms[1].as_mut().unwrap().host_stats = true,
+    ] {
+        let mut invalid = cfg;
+        mutate(&mut invalid);
+        assert_eq!(invalid.encode(), Err(Error::Reserved));
+    }
+    let mut invalid_wire = raw;
+    invalid_wire[crate::HEADER + crate::RECORD + 73] |= 0x10;
+    assert!(matches!(
+        BootConfig::decode(&invalid_wire),
+        Err(Error::Reserved)
+    ));
+}
+
+#[test]
 fn large_initrd_placement() {
     // Independent placement oracle: large initrds grow down from DTB, while
     // all formerly valid <=4 MiB inputs retain their original guest address.

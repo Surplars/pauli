@@ -251,7 +251,7 @@ impl HvArch for Arch {
     }
     fn publish_code() {}
 }
-pub struct TestBoard {
+pub struct TestBoard<const STATS: bool = false> {
     pub info: BoardInfo,
     pub(super) input: SpinLock<VecDeque<u8>>,
     pub(super) direct_linux: core::sync::atomic::AtomicBool,
@@ -264,14 +264,18 @@ pub struct TestBoard {
     pool: Option<DomainPool>,
     disks: [Option<&'static dyn HostBlockDevice>; pauli_config::MAX_DISKS],
 }
-impl Board for TestBoard {
+impl<const STATS: bool> Board for TestBoard<STATS> {
     const IRQ_DRIVEN_CONSOLE: bool = true;
+    const COLLECT_HS_STATS: bool = STATS;
 
     fn info(&self) -> BoardInfo {
         self.info
     }
     fn load_boot_config(&self) -> Result<&'static BootConfig> {
         Ok(self.config)
+    }
+    fn boot_stats_for(&self, slot: usize) -> bool {
+        self.config.boot_stats_for(slot)
     }
     #[cfg(feature = "guest-control")]
     fn boot_service_for(&self, slot: usize) -> Option<usize> {
@@ -423,14 +427,14 @@ impl Fixture {
             _spare: spare,
         }
     }
-    pub(super) fn test_board(
+    pub(super) fn test_board<const STATS: bool>(
         host_cpus: usize,
         guest_cpus: [u8; 2],
         spare_mib: usize,
         disks: [Option<(pauli_config::DiskConfig, &'static dyn HostBlockDevice)>;
             pauli_config::MAX_DISKS],
         template: impl Fn(usize, &mut VmConfig) -> BootImages,
-    ) -> (TestBoard, [Allocation; 2], Option<Allocation>) {
+    ) -> (TestBoard<STATS>, [Allocation; 2], Option<Allocation>) {
         NOW.with(|n| n.set(0));
         CLOCK_READ.with(|hook| hook.take());
         WORKER_STARTS.with(|starts| starts.set(0));

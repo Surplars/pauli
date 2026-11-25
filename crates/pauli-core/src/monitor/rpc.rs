@@ -17,7 +17,7 @@ pub(crate) fn submit<A: HvArch, B: Board>(
     source: u32,
     args: [u64; 6],
 ) -> core::result::Result<Ticket, abi::Return> {
-    let request = abi::decode(args).map_err(abi::Return::error)?;
+    let request = abi::decode_call(args).map_err(abi::Return::error)?;
     let ticket = runtime
         .rpc
         .lock()
@@ -40,23 +40,20 @@ pub(crate) fn pump<A: HvArch, B: Board>(
     };
     // A request queued before native shutdown cannot reopen admission when
     // eventually serviced. Inspection and retirement still get normal replies.
-    let result = if !admitting
+    let reply = if !admitting
         && matches!(
-            work.request.operation,
-            pauli_control::Operation::Create(_) | pauli_control::Operation::Start
+            work.request.vm_operation(),
+            Some(pauli_control::Operation::Create(_) | pauli_control::Operation::Start)
         ) {
-        Err(pauli_control::Error::Busy)
+        abi::encode(Err(pauli_control::Error::Busy))
     } else {
-        service.execute(
+        service.execute_call(
             Caller::Guest(work.source),
             work.request,
             &mut super::Target(runtime),
         )
     };
-    let completed = runtime
-        .rpc
-        .lock()
-        .complete(work, abi::encode_for(work.request.operation, result));
+    let completed = runtime.rpc.lock().complete(work, reply);
     if completed {
         let slot = work.ticket.channel() / MAX_VCPUS;
         let index = work.ticket.channel() % MAX_VCPUS;

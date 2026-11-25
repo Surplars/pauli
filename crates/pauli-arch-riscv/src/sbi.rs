@@ -104,11 +104,13 @@ pub fn handle_ecall_mode(
     }
     let (error, value) = match (eid, fid) {
         #[cfg(feature = "guest-control")]
-        (eid, 0) if eid == MANAGEMENT_EID as usize => {
+        (eid, 0 | 2) if eid == MANAGEMENT_EID as usize => {
             if ctx.x[10..16].iter().any(|value| *value != 0) {
                 (INVALID_PARAM, 0)
-            } else {
+            } else if fid == 0 {
                 return Ok(SbiAction::ManagementProbe);
+            } else {
+                (0, pauli_core::arch::FEAT_STATS as usize)
             }
         }
         (BASE, 0) => (0, 3), // ABI v0.3; only advertised optional EIDs exist.

@@ -17,6 +17,12 @@ impl<A: HvArch, B: Board> Target<'_, A, B> {
     }
 }
 impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
+    fn stats_read(&self, word: pauli_control::StatsWord) -> Result<u64, Error> {
+        if !B::COLLECT_HS_STATS {
+            return Err(Error::Unsupported);
+        }
+        crate::trace::PAULI_HS_STATS.public_word(word)
+    }
     fn grant_page(&self) -> Result<&'static mut pauli_control::GrantPage, Error> {
         let pool = self.0.board.domain_pool().ok_or(Error::NoSpace)?;
         let page = pool

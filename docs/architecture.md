@@ -202,6 +202,28 @@ For consistent totals, stop all harts between callbacks.
 `last_scause`, `last_sepc` and `last_stval` belong to the last exit on
 each owner. The decoder prints them per hart and sums only event counts.
 
+### Online statistics
+
+The guest-control SBI extension uses FID 2 with six zero arguments to
+discover protocol features. Bit 0 identifies `STATS_READ`. This bit is
+independent of collection and guest authority. A nonzero probe argument
+returns `INVALID_PARAM`.
+
+On FID 1, operation 11 takes the six scalars
+`[1, 11, 0, section | (owner << 8) | (word << 16), 0, 0]`.
+Section 0 reads header words 0–7 and requires owner 0. Section 1 reads
+words 0–15 of logical owners 0–63. Higher selector bits are reserved.
+HS first checks the encoding, then authenticates the active caller epoch
+and its host-scoped telemetry grant. Only then does it check that the
+board collects statistics and that the owner exists in the host topology.
+The online view returns zero for owner words 9–11 and for reserved words.
+The JTAG table retains the original trap registers.
+
+The Linux header and owner ioctls each assemble one bounded record. Every
+word is an independent atomic read. Even two equal reads of `vm_exits`
+cannot establish that mail and idle counters came from the same instant.
+Use halted captures when validating cross-field relationships.
+
 ## Bootstrap without a management OS
 
 The firmware/launcher supplies the first manifest, Image, initrd and DTB

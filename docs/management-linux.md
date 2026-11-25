@@ -22,8 +22,9 @@ cargo xtask run --vm configs/vm/manager.toml --kernel /path/to/Image --initrd /p
 ```
 
 `--dry-run` prepares the same manifest and ELF without launching QEMU. The
-resident profile has no disk, networking or default grants. The management VM
-autostarts; the second entry is a stopped, diskless workload template. If a
+resident profile is diskless and has no networking. Its first VM receives
+the host statistics grant and autostarts. The second entry is a stopped
+workload template. Grant operations on that template separately. If a
 management archive contains keys, privileged tools or local configuration,
 set `initramfs` and `initramfs_sha256` on **manager only**; the CLI default is
 also inherited by the workload template. No management secret belongs there.
@@ -89,3 +90,37 @@ readable in its epoch. A receiver cold restart clears its inbox.
 Cold-restarting the manager invalidates its grants. A native shutdown rejects
 queued guest creates/starts too. The hypervisor continues to own CPU, memory,
 interrupts and final retirement. See [the scalar ABI and permissions](vm-config.md).
+
+## Read live host statistics
+
+Run these commands as a process with `CAP_SYS_ADMIN` in the management guest:
+
+```sh
+paulictl stats
+paulictl stats --owner 0 --json
+```
+
+Valence grants access to its external management Linux. On QEMU, enable
+`host_stats = true` on the first Linux VM in the trusted manifest, as in
+`configs/vm/manager.toml`, and build with `--features guest-control,selftest`.
+`guest-control` supplies the transport and `selftest` enables QEMU's
+collector. Each manager boot receives a fresh grant for its active epoch.
+Ordinary guests and children receive no host statistics authority from VM
+grants such as `all`, `mail` or `create`.
+
+Each row labels the logical owner and its physical hart. A registered idle
+hart has a row even when all its counters are zero. JSON uses decimal strings
+for hart IDs and counters, hexadecimal strings for masks, and `null` for an
+unregistered hart ID. Totals include only the displayed registered owners.
+The `sample=live` and `trap_redacted=1` indicators describe word-at-a-time
+sampling and the suppression of the three trap fields. Reading counters
+causes VM exits. Fields may advance during a scan.
+
+The driver negotiates feature bit 0 separately from the existing ABI probe.
+A launcher targeting an older Pauli build must omit `host_stats` or set it
+to false so the manifest uses flags accepted by that build.
+A kernel with the older driver returns `ENOTTY` for the new ioctls. An older
+hypervisor, or a collector-disabled board queried by an authorized caller,
+returns `EOPNOTSUPP` through the current driver. A guest without the HS grant
+gets `EACCES` on a valid statistics request. A Linux process without
+`CAP_SYS_ADMIN` gets `EPERM` at ioctl time.

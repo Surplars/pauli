@@ -134,7 +134,7 @@ pub fn profile(path: &Path) -> Result<(Vec<Vm>, Vec<ManagedDisk>)> {
     let mut vms = Vec::new();
     for entry in entries {
         let table = entry.as_table().context("each VM must be a table")?;
-        let vm = parse_vm(table, directory)?;
+        let vm = parse_vm(table, directory, vms.len())?;
         ensure!(
             !vms.iter()
                 .any(|other: &Vm| other.config.name() == vm.config.name()),
@@ -179,7 +179,7 @@ pub fn profile(path: &Path) -> Result<(Vec<Vm>, Vec<ManagedDisk>)> {
     }
     Ok((vms, disks))
 }
-fn parse_vm(table: &Table, dir: &Path) -> Result<Vm> {
+fn parse_vm(table: &Table, dir: &Path, slot: usize) -> Result<Vm> {
     keys(
         table,
         &[
@@ -199,6 +199,7 @@ fn parse_vm(table: &Table, dir: &Path) -> Result<Vm> {
             "vcpus",
             "cpu_affinity",
             "exclusive_cpus",
+            "host_stats",
             "bootargs",
             "kernel",
             "kernel_sha256",
@@ -227,6 +228,11 @@ fn parse_vm(table: &Table, dir: &Path) -> Result<Vm> {
     config.vcpus = u8::try_from(number(table, "vcpus", 1)?)?;
     config.cpu_affinity = affinity(table.get("cpu_affinity"), config.vcpus)?;
     config.exclusive_cpus = boolean(table, "exclusive_cpus", false)?;
+    config.host_stats = boolean(table, "host_stats", false)?;
+    ensure!(
+        !config.host_stats || (slot == 0 && firmware.is_none()),
+        "host_stats requires a Linux guest in boot slot zero"
+    );
     config.autostart = boolean(table, "autostart", false)?;
     config.net_uplink = boolean(table, "net_uplink", false)?;
     config.stop_on_reset = match text(table, "reset")?.unwrap_or("reload") {
@@ -343,4 +349,21 @@ fn boolean(table: &Table, name: &str, default: bool) -> Result<bool> {
         v.as_bool()
             .with_context(|| format!("{name} must be a boolean"))
     })
+}
+
+#[test]
+fn only_an_explicit_first_linux_entry_can_request_host_stats() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../configs/vm");
+    let (sample, _) = profile(&dir.join("manager.toml")).unwrap();
+    assert!(sample[0].config.host_stats && !sample[1].config.host_stats);
+    let mut entry: Table = "name = 'manager'".parse().unwrap();
+    assert!(!parse_vm(&entry, &dir, 0).unwrap().config.host_stats);
+    entry.insert("host_stats".into(), Value::Boolean(true));
+    assert!(parse_vm(&entry, &dir, 0).unwrap().config.host_stats);
+    assert!(parse_vm(&entry, &dir, 1).is_err());
+    entry.insert("firmware".into(), Value::String("service.elf".into()));
+    entry.insert("firmware_sha256".into(), Value::String("0".repeat(64)));
+    assert!(parse_vm(&entry, &dir, 0).is_err());
+    entry.insert("host_stats".into(), Value::String("true".into()));
+    assert!(parse_vm(&entry, &dir, 0).is_err());
 }

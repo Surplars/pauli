@@ -2,6 +2,7 @@
 # A private management initramfs belongs in this first entry with its own SHA-256.
 [[vm]]
 name = "manager"
+host_stats = true
 memory_mib = 128
 vcpus = 2
 autostart = true

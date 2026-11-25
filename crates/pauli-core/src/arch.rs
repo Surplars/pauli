@@ -32,7 +32,7 @@ pub fn cpu_targets(mask: usize, base: usize, count: usize) -> Option<usize> {
 }
 // Transport backends announce the same ABI without importing the policy crate.
 #[cfg(feature = "guest-control")]
-pub use pauli_control::abi::EID as MANAGEMENT_EID;
+pub use pauli_control::abi::{EID as MANAGEMENT_EID, FEAT_STATS};
 /// # Safety
 /// All arena pointers and RAM mappings must be confined to the resulting
 /// space and its VM. No references may escape a failed build or outlive the

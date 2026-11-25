@@ -20,6 +20,8 @@ pub use grants::GrantPage;
 mod provision;
 pub use provision::{ChildName, ChildSpec, DiskSlot, Shape};
 pub mod queue;
+mod stats;
+pub use stats::{Call, StatsWord};
 
 /// Stable configured resource, independent of its monotonically changing VM
 /// epoch. Values are checked against the backend, not used as unchecked indices.
@@ -228,6 +230,11 @@ impl Error {
 pub trait Backend {
     fn snapshot(&self) -> impl Iterator<Item = Info> + '_;
     fn info(&self, vm: VmId) -> Result<Info, Error>;
+    /// Read one online telemetry word after authorization. Check availability
+    /// and runtime owner bounds even for words redacted in the online view.
+    fn stats_read(&self, _word: StatsWord) -> Result<u64, Error> {
+        Err(Error::Unsupported)
+    }
     fn start(&mut self, vm: VmId) -> Result<bool, Error>;
     fn stop(&mut self, vm: VmId) -> Result<(), Error>;
     fn input(&mut self, vm: VmId, byte: u8) -> Result<(), Error>;
@@ -298,7 +305,7 @@ impl Service {
             Caller::Host => Ok(None),
             Caller::Guest(source) => self
                 .grants
-                .get(source, vm)
+                .vm_grant(source, vm)
                 .filter(|grant| grant.rights.contains(right))
                 .map(Some)
                 .ok_or(Error::Denied),
@@ -323,12 +330,12 @@ impl Service {
         }
         let target_epoch = backend.info(vm)?.epoch;
         self.grants.set(
-            Grant {
+            grants::Entry::Vm(Grant {
                 source,
                 vm,
                 rights,
                 target_epoch,
-            },
+            }),
             backend,
         )?;
         Ok(())
@@ -338,14 +345,15 @@ impl Service {
         if caller != Caller::Host {
             return Err(Error::Denied);
         }
-        self.grants.remove(|g| g.source == source && g.vm == vm);
+        self.grants
+            .remove(|entry| entry.key() == (source, Some(vm)));
         Ok(())
     }
 
     /// Owner notification for guest shutdown/fault, or epoch retirement. No
     /// authority silently transfers to the replacement guest in the same slot.
     pub fn retire(&mut self, source: u32) {
-        self.grants.remove(|g| g.source == source);
+        self.grants.remove(|entry| entry.key().0 == source);
     }
 
     /// Hidden VMs are omitted, not exposed as denied records. Snapshot contains

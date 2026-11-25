@@ -56,6 +56,7 @@ fn linux(input: &External<'_>, header: &[u8]) -> Result<VmConfig> {
         return Err(HvError::Unsupported);
     }
     vm.aia = input.aia;
+    vm.host_stats = input.manager;
     let file_size = input.image.size() as u64;
     vm.image = VmImage {
         kernel_source: input.image.base() as u64,

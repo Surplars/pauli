@@ -113,6 +113,8 @@ pub struct VmConfig {
     pub cpu_affinity: CpuAffinity,
     /// Reserve the distinct, explicitly pinned owners for this VM at boot.
     pub exclusive_cpus: bool,
+    /// Trusted boot policy for exposing host counters to the first Linux guest.
+    pub host_stats: bool,
     pub image: VmImage,
     pub firmware: Option<FirmwareLayout>,
 }

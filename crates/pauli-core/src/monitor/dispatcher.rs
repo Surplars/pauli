@@ -210,5 +210,14 @@ impl Monitor {
                 grant(&service, manager_slot, Rights::MAIL);
             }
         }
+        // Preserve the fixed service's grant priority when the table is full.
+        if runtime.board.boot_stats_for(ready)
+            && let Ok(manager) = runtime.manager.vm(ready)
+            && let Err(error) =
+                self.service
+                    .grant_stats(Caller::Host, manager.epoch(), &Target(runtime))
+        {
+            pauli_hal::hv_error!("boot stats grant VM {}: {}", ready + 1, error.message());
+        }
     }
 }

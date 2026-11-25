@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,12 +17,15 @@
 #define DEFAULT_TIMEOUT_MS 30000
 #define POLL_MS 50
 #define LIST_COMMAND 1UL /* local command, never submitted as an ioctl */
+#define STATS_MAX_OWNERS 64
 
 struct command {
 	unsigned long op;
 	uint32_t id, epoch, timeout_ms;
 	uint64_t cursor;
 	bool wait, follow, raw, has_epoch, has_timeout;
+	bool json, has_owner;
+	uint32_t owner;
 	struct pauli_create create;
 	struct pauli_mail mail;
 };
@@ -29,6 +33,7 @@ struct command {
 static void usage(FILE *out)
 {
 	fputs("Usage: paulictl info | list | status TARGET\n"
+	      "       paulictl stats [--owner N] [--json]\n"
 	      "       paulictl {start|destroy|memory} TARGET [--epoch E]\n"
 	      "       paulictl stop TARGET [--epoch E] [--wait [--timeout-ms MS]]\n"
 	      "       paulictl logs TARGET [--epoch E] [--cursor N] [--follow [--timeout-ms MS]]\n"
@@ -118,6 +123,7 @@ static bool parse_command(int argc, char **argv, struct command *cmd)
 		{"start", PAULI_START}, {"stop", PAULI_STOP}, {"destroy", PAULI_DESTROY},
 		{"create", PAULI_CREATE}, {"memory", PAULI_MEMORY},
 		{"logs", PAULI_LOG_READ}, {"send", PAULI_MAIL_SEND}, {"recv", PAULI_MAIL_RECV},
+		{"stats", PAULI_STATS_HEADER},
 	};
 	*cmd = (struct command){.timeout_ms = DEFAULT_TIMEOUT_MS};
 	if (argc < 2)
@@ -129,6 +135,20 @@ static bool parse_command(int argc, char **argv, struct command *cmd)
 		return false;
 	if (cmd->op == PAULI_INFO || cmd->op == LIST_COMMAND)
 		return argc == 2;
+	if (cmd->op == PAULI_STATS_HEADER) {
+		for (int i = 2; i < argc; i++) {
+			if (!strcmp(argv[i], "--json") && !cmd->json) {
+				cmd->json = true;
+			} else if (!strcmp(argv[i], "--owner") && !cmd->has_owner && i + 1 < argc) {
+				if (!number(argv[++i], 0, STATS_MAX_OWNERS - 1, &cmd->owner))
+					return false;
+				cmd->has_owner = true;
+			} else {
+				return false;
+			}
+		}
+		return true;
+	}
 	if (argc < 3 || !(cmd->id = target_id(argv[2])))
 		return false;
 	if (cmd->op == PAULI_INSPECT)
@@ -409,9 +429,127 @@ static int recv_mail(int fd, const struct command *cmd, uint32_t epoch)
 	}
 }
 
+/* These fields alone have additive semantics across physical owners. */
+static const struct {
+	const char *name;
+	size_t offset;
+} stats_counters[] = {
+#define COUNTER(field) {#field, offsetof(struct pauli_stats_owner, field)}
+	COUNTER(vm_exits), COUNTER(wfi_exits), COUNTER(sbi_timer_exits),
+	COUNTER(sstc_timer_exits), COUNTER(mmio_exits), COUNTER(other_exits),
+	COUNTER(vtimer_irqs), COUNTER(ext_irqs), COUNTER(idle_wfi),
+	COUNTER(mail_sends), COUNTER(mail_recvs),
+#undef COUNTER
+};
+
+/* A sum spans at most 64 u64 values. Base 10^18 also works on compat hosts. */
+#define DECIMAL_BASE UINT64_C(1000000000000000000)
+struct counter_sum {
+	uint64_t high, low;
+};
+
+static void add_counter(struct counter_sum *sum, uint64_t value)
+{
+	sum->high += value / DECIMAL_BASE;
+	sum->low += value % DECIMAL_BASE;
+	if (sum->low >= DECIMAL_BASE) {
+		sum->low -= DECIMAL_BASE;
+		sum->high++;
+	}
+}
+
+static void print_stats(const struct pauli_stats_header *header,
+			const struct pauli_stats_owner *rows, size_t count, bool json)
+{
+	enum { COUNTERS = sizeof(stats_counters) / sizeof(stats_counters[0]) };
+	struct counter_sum totals[COUNTERS] = {};
+	if (json)
+		printf("{\"version\":%u,\"sample\":\"live\",\"trap_redacted\":true,"
+		       "\"host_cpus\":%u,\"sstc_owners\":\"0x%" PRIx64 "\","
+		       "\"exclusive_owners\":\"0x%" PRIx64 "\",\"owners\":[",
+		       header->version, header->host_cpus, (uint64_t)header->sstc_owners,
+		       (uint64_t)header->exclusive_owners);
+	else
+		printf("version=%u sample=live trap_redacted=1 host_cpus=%u "
+		       "sstc_owners=0x%" PRIx64 " exclusive_owners=0x%" PRIx64 "\n",
+		       header->version, header->host_cpus, (uint64_t)header->sstc_owners,
+		       (uint64_t)header->exclusive_owners);
+	for (size_t i = 0; i < count; i++) {
+		const struct pauli_stats_owner *row = &rows[i];
+		if (json)
+			printf("%s{\"owner\":%u,\"registered\":%s,\"hart_id\":", i ? "," : "",
+			       row->owner, row->registered ? "true" : "false");
+		else
+			printf("owner=%u registered=%u hart_id=", row->owner, row->registered);
+		if (!row->registered) {
+			fputs(json ? "null}" : "unregistered\n", stdout);
+			continue;
+		}
+		printf(json ? "\"%" PRIu64 "\"" : "%" PRIu64, (uint64_t)row->hart_id);
+		for (size_t k = 0; k < COUNTERS; k++) {
+			uint64_t value;
+			memcpy(&value, (const char *)row + stats_counters[k].offset, sizeof(value));
+			add_counter(&totals[k], value);
+			printf(json ? ",\"%s\":\"%" PRIu64 "\"" : " %s=%" PRIu64,
+			       stats_counters[k].name, value);
+		}
+		putchar(json ? '}' : '\n');
+	}
+	fputs(json ? "],\"totals\":{" : "totals", stdout);
+	for (size_t k = 0; k < COUNTERS; k++) {
+		if (json)
+			printf("%s\"%s\":\"", k ? "," : "", stats_counters[k].name);
+		else
+			printf(" %s=", stats_counters[k].name);
+		if (totals[k].high)
+			printf("%" PRIu64 "%018" PRIu64, totals[k].high, totals[k].low);
+		else
+			printf("%" PRIu64, totals[k].low);
+		if (json)
+			putchar('"');
+	}
+	fputs(json ? "}}\n" : "\n", stdout);
+}
+
+static int read_stats(int fd, const struct command *cmd)
+{
+	struct pauli_stats_header hdr = {};
+	struct pauli_stats_owner rows[STATS_MAX_OWNERS] = {};
+	if (ioctl(fd, PAULI_STATS_HEADER, &hdr) < 0)
+		return -1;
+	if (hdr.version != 2 || !hdr.host_cpus || hdr.host_cpus > STATS_MAX_OWNERS ||
+	    !(hdr.flags & PAULI_STATS_TRAP_REDACTED)) {
+		errno = EPROTO;
+		return -1;
+	}
+	if (cmd->has_owner && cmd->owner >= hdr.host_cpus) {
+		errno = EINVAL;
+		return -1;
+	}
+	size_t count = cmd->has_owner ? 1 : hdr.host_cpus;
+	for (size_t i = 0; i < count; i++) {
+		struct pauli_stats_owner *row = &rows[i];
+		uint32_t owner = cmd->has_owner ? cmd->owner : (uint32_t)i;
+		row->owner = owner;
+		if (ioctl(fd, PAULI_STATS_OWNER, row) < 0)
+			return -1;
+		if (row->owner != owner || row->registered != (row->hart_id != UINT64_MAX) ||
+		    !(row->flags & PAULI_STATS_TRAP_REDACTED) ||
+		    row->last_scause || row->last_sepc || row->last_stval) {
+			errno = EPROTO;
+			return -1;
+		}
+	}
+	/* Complete every ioctl before emitting any part of a machine-readable reply. */
+	print_stats(&hdr, rows, count, cmd->json);
+	return ferror(stdout) ? -1 : fflush(stdout);
+}
+
 static int request(int fd, const struct command *cmd)
 {
 	struct pauli_vm vm;
+	if (cmd->op == PAULI_STATS_HEADER)
+		return read_stats(fd, cmd);
 	if (cmd->op == PAULI_INFO || cmd->op == LIST_COMMAND) {
 		struct pauli_info info = {0};
 		if (ioctl(fd, PAULI_INFO, &info) < 0)

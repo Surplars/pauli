@@ -90,4 +90,31 @@ struct pauli_mail {
 #define PAULI_MAIL_SEND	_IOW('P', 0x78, struct pauli_mail)
 #define PAULI_MAIL_RECV	_IOWR('P', 0x79, struct pauli_mail)
 
+#define PAULI_STATS_TRAP_REDACTED	(1U << 0)
+
+/* Live samples. Each 64-bit counter is read independently. */
+struct pauli_stats_header {
+	__u32 version;
+	__u32 host_cpus;
+	__u64 sstc_owners;
+	__u64 exclusive_owners;
+	__u32 flags;	/* PAULI_STATS_TRAP_REDACTED. */
+	__u32 reserved;
+};
+
+struct pauli_stats_owner {
+	__u32 owner;	/* In: zero-based owner index below host_cpus. */
+	__u32 registered;
+	__u32 flags;	/* All fields except owner are output only. */
+	__u32 pad;
+	__u64 hart_id;	/* All ones for an unregistered owner. */
+	__u64 vm_exits, wfi_exits, sbi_timer_exits, sstc_timer_exits;
+	__u64 mmio_exits, other_exits, vtimer_irqs, ext_irqs;
+	__u64 last_scause, last_sepc, last_stval;	/* Always zero. */
+	__u64 idle_wfi, mail_sends, mail_recvs, reserved;
+};
+
+#define PAULI_STATS_HEADER	_IOR('P', 0x7a, struct pauli_stats_header)
+#define PAULI_STATS_OWNER	_IOWR('P', 0x7b, struct pauli_stats_owner)
+
 #endif /* _UAPI_LINUX_PAULI_H */

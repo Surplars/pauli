@@ -68,6 +68,11 @@ pub trait Board: Send + Sync + 'static {
     fn boot_service_for(&self, _manager_slot: usize) -> Option<usize> {
         None
     }
+    /// Native boot policy may grant host statistics to this immutable slot's
+    /// current incarnation when it becomes Ready.
+    fn boot_stats_for(&self, _slot: usize) -> bool {
+        false
+    }
     /// Initial sponsor budget for this zero-based boot slot. A budget and a
     /// domain pool also allow its manager to clone the designated service.
     fn boot_service_quota(&self, _manager_slot: usize) -> Option<crate::manager::Budget> {

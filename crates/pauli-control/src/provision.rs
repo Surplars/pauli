@@ -91,7 +91,7 @@ impl Service {
         };
         let info = backend.create(sponsor, template, spec)?;
         if let Some((source, entry)) = child_grant {
-            *entry = Some(Grant {
+            *entry = Some(grants::Entry::Vm(Grant {
                 source,
                 vm: info.vm,
                 rights: Rights::ALL
@@ -99,7 +99,7 @@ impl Service {
                     .union(Rights::LOG)
                     .union(Rights::MAIL),
                 target_epoch: info.epoch,
-            });
+            }));
         }
         Ok(Reply {
             info,
@@ -117,8 +117,10 @@ impl Service {
         backend.destroy(before.vm, before.epoch)?;
         // Both directions matter: a newly allocated slot is not the old target,
         // even for other live managers that can inspect its replacement epoch.
-        self.grants
-            .remove(|g| g.vm == before.vm || g.source == before.epoch);
+        self.grants.remove(|entry| {
+            let (source, vm) = entry.key();
+            vm == Some(before.vm) || source == before.epoch
+        });
         Ok(Reply {
             info: before,
             changed: true,

@@ -30,7 +30,7 @@ fn invalid_exclusive_topology_rejects_the_manifest_before_taking_boot_ram() {
     use std::boxed::Box;
 
     let (board, _backing, _spare) =
-        Fixture::test_board(2, [1, 1], 0, [None; MAX_DISKS], |slot, vm| {
+        Fixture::test_board::<false>(2, [1, 1], 0, [None; MAX_DISKS], |slot, vm| {
             if slot == 0 {
                 let mut pins = [0; MAX_GUEST_VCPUS as usize];
                 pins[0] = 1;

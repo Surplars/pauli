@@ -16,8 +16,12 @@ class GuardScope(unittest.TestCase):
         for eol in (b"\n", b"\r\n"):
             source = original.replace(b"\r\n", b"\n").replace(b"\n", eol)
             restored = REF.guarded(source)
-            for outside, inside in REF.REPLACEMENTS:
-                self.assertLess(inside.index("A::Smp::kick"), inside.index("drop(mailbox)"))
+            calls = ("Self::kick_posted(vm, slot)", "A::Smp::kick(target.owner)")
+            self.assertEqual(len(calls), len(REF.REPLACEMENTS))
+            for call, (outside, inside) in zip(calls, REF.REPLACEMENTS):
+                self.assertEqual(outside.count(call), 1)
+                self.assertEqual(inside.count(call), 1)
+                self.assertLess(inside.index(call), inside.index("drop(mailbox)"))
                 tail = inside.split("drop(mailbox);", 1)[1].strip()
                 self.assertTrue(tail.startswith(("if notified", "notified.map(")))
                 old, new = (part.encode().replace(b"\n", eol) for part in (outside, inside))

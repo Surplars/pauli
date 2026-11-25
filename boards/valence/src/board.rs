@@ -78,6 +78,9 @@ impl Board for Wave8 {
         // Only the native manager handoff installs the fixed manager/service pair.
         (self.boot.management && manager_slot == 0).then_some(1)
     }
+    fn boot_stats_for(&self, slot: usize) -> bool {
+        self.boot.boot_stats_for(slot)
+    }
     fn domain_pool(&self) -> Option<&DomainPool> {
         self.domain_pool.as_ref()
     }

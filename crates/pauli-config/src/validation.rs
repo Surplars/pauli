@@ -9,6 +9,15 @@ impl BootConfig {
         self.vms.iter().flatten().count()
     }
 
+    /// Only the explicitly selected management Linux boot slot can receive the
+    /// host-scoped statistics grant. Dynamic slots never participate.
+    pub fn boot_stats_for(&self, slot: usize) -> bool {
+        slot == 0
+            && self.management
+            && !self.smoke_payload
+            && self.vms[0].is_some_and(|vm| vm.host_stats && vm.firmware.is_none())
+    }
+
     /// Resolve all explicit reservations against the actual management hart and host width.
     pub fn exclusive_owner_mask(&self, boot_cpu: usize, host_cpus: usize) -> Result<u64, Error> {
         let host = u8::try_from(host_cpus).map_err(|_| Error::Affinity)?;
@@ -52,6 +61,9 @@ impl BootConfig {
         self.exclusive_pins(MAX_HOST_CPUS)?;
         let mut assigned = [0; MAX_DISKS];
         for (index, vm) in self.vms.iter().flatten().enumerate() {
+            if vm.host_stats && !self.boot_stats_for(index) {
+                return Err(Error::Reserved);
+            }
             self.validate_memory(vm)?;
             self.validate_image(vm)?;
             if vm.dtb_size == 0

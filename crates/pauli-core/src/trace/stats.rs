@@ -92,6 +92,54 @@ impl HsStats {
         }
     }
 
+    /// An online reader samples one named atomic per request. Trap details
+    /// remain private to the native debugger.
+    pub(crate) fn public_word(
+        &self,
+        index: pauli_control::StatsWord,
+    ) -> Result<u64, pauli_control::Error> {
+        use pauli_control::Error;
+        let field = match index.section() {
+            0 if index.owner() == 0 => match index.word() {
+                0 => &self.magic,
+                1 => &self.version,
+                2 => &self.header_bytes,
+                3 => &self.owner_stride,
+                4 => &self.host_cpus,
+                5 => &self.sstc_owners,
+                6 => &self.exclusive_owners,
+                7 => return Ok(0),
+                _ => return Err(Error::Invalid),
+            },
+            1 => {
+                let owner = usize::from(index.owner());
+                if owner as u64 >= self.host_cpus.load(Ordering::Acquire) {
+                    return Err(Error::Invalid);
+                }
+                let stats = self.owners.get(owner).ok_or(Error::Invalid)?;
+                match index.word() {
+                    0 => &stats.hart_id,
+                    1 => &stats.vm_exits,
+                    2 => &stats.wfi_exits,
+                    3 => &stats.sbi_timer_exits,
+                    4 => &stats.sstc_timer_exits,
+                    5 => &stats.mmio_exits,
+                    6 => &stats.other_exits,
+                    7 => &stats.vtimer_irqs,
+                    8 => &stats.ext_irqs,
+                    9..=11 => return Ok(0),
+                    12 => &stats.idle_wfi,
+                    13 => &stats.mail_sends,
+                    14 => &stats.mail_recvs,
+                    15 => return Ok(0),
+                    _ => return Err(Error::Invalid),
+                }
+            }
+            _ => return Err(Error::Invalid),
+        };
+        Ok(field.load(Ordering::Acquire))
+    }
+
     /// Called once on the boot hart, with validated topology, before launching workers.
     pub(crate) fn init_host(&self, host_cpus: usize, exclusive_owners: u64) {
         assert!((1..=MAX_CPUS).contains(&host_cpus));

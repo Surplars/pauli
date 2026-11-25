@@ -3,8 +3,8 @@
 //! Ownership/Lock Ordering: by-value scalar conversion; no locks or backend access.
 //! Invariants: caller identity and pointers are never accepted from request words.
 use crate::{
-    ChildName, ChildSpec, ConsoleChunk, DiskSlot, Error, MailChunk, MailMessage, Operation, Reply,
-    Request, Shape, State, VmId,
+    Call, ChildName, ChildSpec, ConsoleChunk, DiskSlot, Error, MailChunk, MailMessage, Operation,
+    Reply, Request, Shape, State, StatsWord, VmId,
 };
 use core::num::{NonZeroU8, NonZeroU16};
 
@@ -25,6 +25,9 @@ pub const CREATE_DISK: u64 = 7;
 pub const CONSOLE_READ: u64 = 8;
 pub const MAIL_SEND: u64 = 9;
 pub const MAIL_RECV: u64 = 10;
+pub const STATS_READ: u64 = 11;
+/// Supported online stats protocol, independent of the caller's permission.
+pub const FEAT_STATS: u64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Return {
@@ -37,6 +40,28 @@ impl Return {
     }
 }
 
+/// Decode host-scoped calls before the VM protocol's nonzero resource-ID check.
+pub fn decode_call(args: [u64; 6]) -> Result<Call, i64> {
+    if args[1] != STATS_READ {
+        return decode(args).map(Call::Vm);
+    }
+    if args[0] != VERSION {
+        return Err(NOT_SUPPORTED);
+    }
+    let selector = args[3];
+    if args[2] != 0 || selector >> 24 != 0 || args[4] != 0 || args[5] != 0 {
+        return Err(INVALID_PARAM);
+    }
+    StatsWord::new(
+        selector as u8,
+        (selector >> 8) as u8,
+        (selector >> 16) as u8,
+    )
+    .map(Call::StatsRead)
+    .ok_or(INVALID_PARAM)
+}
+
+/// Decode a VM-targeted request.
 pub fn decode(args: [u64; 6]) -> Result<Request, i64> {
     if args[0] != VERSION {
         return Err(NOT_SUPPORTED);

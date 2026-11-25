@@ -39,6 +39,9 @@ impl Board for QemuVirtBoard {
     fn load_boot_config(&self) -> Result<&'static BootConfig> {
         Ok(&BOARD.get().ok_or(HvError::InvalidState)?.boot)
     }
+    fn boot_stats_for(&self, slot: usize) -> bool {
+        self.boot.boot_stats_for(slot)
+    }
     fn take_resources(&self, slot: usize, _vm: &VmConfig) -> Result<VmResources> {
         self.resources
             .lock()
