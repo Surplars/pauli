@@ -120,7 +120,7 @@ pub(crate) struct RxObservation {
 #[cfg(feature = "selftest")]
 impl RxObservation {
     pub(super) fn enabled(config: &VmConfig) -> bool {
-        config.firmware.is_some() && config.vcpus == 1 && !config.aia
+        config.firmware.is_some() && config.vcpus == 1 && !config.aia && !config.control_events
     }
     pub(super) fn record_rise(&mut self, byte: u8, ticks: u64) {
         let seq = self.last.map_or(1, |r| r.seq.wrapping_add(1));

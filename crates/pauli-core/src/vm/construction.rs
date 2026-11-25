@@ -52,6 +52,14 @@ impl<A: HvArch> Vm<A> {
                 .filter(|ticks| *ticks != 0)
                 .ok_or(HvError::InvalidConfig)?;
         let payload = board.payload();
+        if config.control_events
+            && (payload == Payload::Embedded || !cfg!(feature = "guest-control"))
+        {
+            return Err(HvError::Unsupported);
+        }
+        if payload != Payload::Embedded {
+            A::validate_control_events(resources.images.dtb, &config, board.layout())?;
+        }
         let sstc =
             payload != Payload::Embedded && A::guest_sstc(resources.images.dtb, config.vcpus)?;
         if sstc

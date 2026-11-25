@@ -205,8 +205,9 @@ each owner. The decoder prints them per hart and sums only event counts.
 ### Online statistics
 
 The guest-control SBI extension uses FID 2 with six zero arguments to
-discover protocol features. Bit 0 identifies `STATS_READ`. This bit is
-independent of collection and guest authority. A nonzero probe argument
+discover protocol features. Bit 0 identifies `STATS_READ` and bit 1
+identifies the event interface. Discovery is independent of collection,
+per-VM device configuration and guest authority. A nonzero probe argument
 returns `INVALID_PARAM`.
 
 On FID 1, operation 11 takes the six scalars
@@ -223,6 +224,43 @@ The Linux header and owner ioctls each assemble one bounded record. Every
 word is an independent atomic read. Even two equal reads of `vm_exits`
 cannot establish that mail and idle counters came from the same instant.
 Use halted captures when validating cross-field relationships.
+
+### Mail notification and guest WFI
+
+An opted-in guest has a level-high control interrupt on virtual source 12.
+The guest configures its PLIC context or chooses an APLIC target and IMSIC
+interrupt identity. On both topologies the device tree describes the wired
+source. Its node has no MMIO region.
+
+Under the management SBI EID, FID 3 operates synchronously on the active
+caller's own event state. Arguments and results are XLEN-wide scalars.
+
+| Call | Arguments a0 through a5 | Success value in a1 |
+| --- | --- | --- |
+| TAKE | `[0, 0, 0, 0, 0, 0]` | All pending reasons, cleared in the same operation |
+| MASK | `[1, mask, 0, 0, 0, 0]` | Previous mask |
+
+The initial mask is zero. Bit 0 subscribes to MAIL. Bits 1 (LOG) and
+2 (STATE) are reserved. Bit 3 (RESCAN) is a return-only reason that tells
+an existing watcher to recheck its bindings. A MAIL subscription also
+enables IRQ delivery for RESCAN. Invalid commands, mask bits or reserved
+arguments return `INVALID_PARAM`. A guest without the device receives
+`NOT_SUPPORTED` for a well-formed event call. If a host stop closes an
+opted-in VM before the call takes effect, the call returns `INVALID_STATE`.
+
+TAKE works with interrupts masked. Multiple arrivals can produce one MAIL
+bit. A guest should drain the relevant peer inboxes after a wake. An empty
+TAKE succeeds, including after a forwarded MSI or a claim has outlived
+the hint. Taking a hint leaves the payload available to MAIL_RECV. If a
+guest polls and receives the message first, that message's hint is removed.
+
+The management owner commits the copied message before publishing its
+hint. A send from A to B can notify B only if B also holds MAIL on A's
+current epoch. A later grant does not notify B about an earlier send.
+Retiring an epoch or revoking a receive grant retracts its interest.
+Publication and TAKE serialize the event state and interrupt level under
+the recipient device lock followed by the interrupt-controller lock.
+Physical owner kicks happen after both locks are released.
 
 ## Bootstrap without a management OS
 

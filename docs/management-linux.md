@@ -87,6 +87,11 @@ explicit send by the peer. Each VM can hold sixteen messages, up to eight
 from any one sender incarnation. A stopped sender's queued messages remain
 readable in its epoch. A receiver cold restart clears its inbox.
 
+The hypervisor can also wake an opted-in guest with a wired control
+interrupt. The current Linux driver and `paulictl recv --wait` still use
+polling. Firmware using the new SBI interface can enable MAIL wakes with
+a receive grant alone. See [mail notification and guest WFI](architecture.md#mail-notification-and-guest-wfi).
+
 Cold-restarting the manager invalidates its grants. A native shutdown rejects
 queued guest creates/starts too. The hypervisor continues to own CPU, memory,
 interrupts and final retirement. See [the scalar ABI and permissions](vm-config.md).

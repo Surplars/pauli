@@ -262,7 +262,9 @@ fn management_vcpu_can_only_create_with_its_granted_disk_and_template() {
         call(&mut service, &mut cpu, requested, b'x'),
         reject(abi::INVALID_STATE)
     );
-    service.revoke(Caller::Host, sender, template.vm).unwrap();
+    service
+        .revoke(Caller::Host, sender, template.vm, &target)
+        .unwrap();
     assert_eq!(
         call(&mut service, &mut cpu, requested, b'y'),
         reject(abi::DENIED)

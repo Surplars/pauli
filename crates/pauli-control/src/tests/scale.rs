@@ -153,7 +153,7 @@ fn directory_growth_preserves_create_revoke_and_epoch_bound_destruction() {
     s.grant(Caller::Host, 3, high.vm, Rights::INSPECT, &b)
         .unwrap();
     assert_eq!(s.execute(peer, inspect, &mut b).unwrap().info, high);
-    s.revoke(Caller::Host, 1, high.vm).unwrap();
+    s.revoke(Caller::Host, 1, high.vm, &b).unwrap();
     assert_eq!(s.execute(admin, inspect, &mut b), Err(Error::Denied));
     s.grant(Caller::Host, 1, high.vm, Rights::DESTROY, &b)
         .unwrap();
@@ -164,7 +164,7 @@ fn directory_growth_preserves_create_revoke_and_epoch_bound_destruction() {
     assert_ne!(fresh.epoch, high.epoch);
     assert_eq!(s.execute(admin, destroy, &mut b), Err(Error::StaleEpoch));
     assert_eq!(s.execute(peer, inspect, &mut b), Err(Error::Denied));
-    s.retire(1);
+    s.retire(1, &b);
     assert_eq!(s.list(admin, &b).count(), 0);
     assert_eq!(b.info(first.vm), Ok(first));
 }

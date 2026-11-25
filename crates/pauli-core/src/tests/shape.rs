@@ -30,7 +30,7 @@ pub(super) fn template_with_sstc(slot: usize, vm: &mut VmConfig, sstc: bool) -> 
     vm.image.initrd_source = (16 << 20) + 8192;
     vm.image.initrd_size = 4;
     let mut out = vec![0; MAX_GUEST_DTB];
-    let n = pauli_config::guest_dtb::riscv_with_sstc(
+    let n = pauli_config::guest_dtb::riscv_configured(
         vm,
         GuestBoardLayout::DEFAULT,
         1_000_000,
@@ -306,4 +306,95 @@ fn opaque_trees_and_unauthorized_pin_growth_do_not_consume_the_spare_extent() {
         .unwrap();
     let pinned = rt.manager.vm(2).unwrap();
     assert_eq!((shrunk.vcpus, pinned.cpu(0).unwrap().owner), (1, 1));
+}
+
+#[test]
+#[cfg(feature = "guest-control")]
+fn unshaped_clones_omit_the_control_device_and_preserve_opaque_boot_trees() {
+    let fixture = Fixture::with_templates(1, [1, 1], 98, |slot, vm| {
+        vm.control_events = true;
+        let mut images = template(slot, vm);
+        if slot == 0 {
+            let mut bytes = images.dtb.to_vec();
+            let i = bytes.windows(7).position(|v| v == b"OpenIon").unwrap();
+            bytes[i] = b'X';
+            images.dtb = Box::leak(bytes.into_boxed_slice());
+        }
+        images
+    });
+    let rt = &fixture.runtime;
+    let mut target = Target(rt);
+    let name = ChildName::new("child").unwrap();
+    assert_eq!(
+        target.create(None, VmId(1), name.into()),
+        Err(Error::Unsupported)
+    );
+    let opaque = dtb(&rt.manager.vm(0).unwrap());
+    assert!(opaque.windows(7).any(|v| v == b"XpenIon"));
+    let child = target.create(None, VmId(2), name.into()).unwrap();
+    let vm = rt.manager.vm(child.vm.0 as usize - 1).unwrap();
+    assert!(!vm.config.control_events);
+    let bytes = dtb(&vm);
+    assert!(
+        Fdt::new(&bytes)
+            .unwrap()
+            .find("/pauli-control")
+            .unwrap()
+            .is_none()
+    );
+    let source = dtb(&rt.manager.vm(1).unwrap());
+    assert!(
+        Fdt::new(&source)
+            .unwrap()
+            .find("/pauli-control")
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+#[cfg(feature = "guest-control")]
+fn event_enabled_firmware_clone_keeps_its_linked_image_and_omits_only_optional_discovery() {
+    let fixture = Fixture::with_templates(1, [1, 1], 1, |_, vm| {
+        vm.control_events = true;
+        vm.memory_size = 64 * 1024;
+        vm.firmware = Some(pauli_config::FirmwareLayout {
+            rx_pages: 1,
+            ro_pages: 0,
+        });
+        let mut out = vec![0; MAX_GUEST_DTB];
+        let n = pauli_config::guest_dtb::riscv_configured(
+            vm,
+            GuestBoardLayout::DEFAULT,
+            1_000_000,
+            "",
+            false,
+            &mut out,
+        )
+        .unwrap();
+        out.truncate(n);
+        BootImages {
+            kernel: &[0x31; 64],
+            initrd: &[],
+            dtb: Box::leak(out.into_boxed_slice()),
+        }
+    });
+    let rt = &fixture.runtime;
+    let child = Target(rt)
+        .create(None, VmId(1), ChildName::new("service").unwrap().into())
+        .unwrap();
+    let vm = rt.manager.vm(child.vm.0 as usize - 1).unwrap();
+    let parent = rt.manager.vm(0).unwrap();
+    assert!(parent.config.control_events && !vm.config.control_events);
+    assert_eq!(vm.config.firmware, parent.config.firmware);
+    let blob = dtb(&vm);
+    let tree = Fdt::new(&blob).unwrap();
+    assert!(
+        tree.find("/")
+            .unwrap()
+            .unwrap()
+            .compatible("openion,firmware-guest")
+            .unwrap()
+    );
+    assert!(tree.find("/pauli-control").unwrap().is_none());
 }

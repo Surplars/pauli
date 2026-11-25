@@ -28,6 +28,14 @@ pub const MAIL_RECV: u64 = 10;
 pub const STATS_READ: u64 = 11;
 /// Supported online stats protocol, independent of the caller's permission.
 pub const FEAT_STATS: u64 = 1;
+pub const FEAT_EVENTS: u64 = 2;
+pub const EVENTS_TAKE: u64 = 0;
+pub const EVENTS_MASK: u64 = 1;
+pub const EVENT_MAIL: u64 = 1;
+pub const EVENT_LOG: u64 = 2;
+pub const EVENT_STATE: u64 = 4;
+/// A subscribed MAIL binding expired. No peer identity or activity is disclosed.
+pub const EVENT_RESCAN: u64 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Return {

@@ -67,7 +67,7 @@ fn exclusive_flag_occupies_only_bit_eleven_in_v15() {
     let decoded = BootConfig::decode(&extended).unwrap();
     assert!(decoded.vms[0].unwrap().exclusive_cpus);
     assert_eq!(decoded.encode().unwrap(), extended);
-    extended[HEADER + 73] |= 0x20;
+    extended[HEADER + 73] |= 0x40;
     assert!(matches!(
         BootConfig::decode(&extended),
         Err(Error::Reserved)

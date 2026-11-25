@@ -5,8 +5,10 @@ use crate::{
     Error, GuestBoardLayout, GuestIrqConfig, GuestIrqController, MAX_GUEST_VCPUS, MmioRegion,
     VmConfig,
 };
+mod control;
 mod sstc;
 mod writer;
+pub use control::validate_control_events;
 pub use sstc::riscv_sstc;
 use writer::{Hex, Writer};
 type Result<T = ()> = core::result::Result<T, Error>;
@@ -15,6 +17,7 @@ const CONTROLLER: u32 = 1;
 const MSI: u32 = 2;
 const EXTERNAL: u32 = 9;
 const LEVEL_HIGH: u32 = 4;
+const CONTROL_COMPATIBLE: &str = "openion,pauli-control";
 
 /// Write the canonical tree, with no host addresses. Truncated output on error
 /// is never a DTB; only the returned prefix may be staged or used for restore.
@@ -35,6 +38,30 @@ pub fn riscv_with_sstc(
     hz: u32,
     args: &str,
     sstc: bool,
+    out: &mut [u8],
+) -> Result<usize> {
+    render(vm, layout, hz, args, sstc, false, out)
+}
+
+/// Render the trusted VM's optional devices alongside its admitted timer capability.
+pub fn riscv_configured(
+    vm: &VmConfig,
+    layout: GuestBoardLayout,
+    hz: u32,
+    args: &str,
+    sstc: bool,
+    out: &mut [u8],
+) -> Result<usize> {
+    render(vm, layout, hz, args, sstc, vm.control_events, out)
+}
+
+fn render(
+    vm: &VmConfig,
+    layout: GuestBoardLayout,
+    hz: u32,
+    args: &str,
+    sstc: bool,
+    control_events: bool,
     out: &mut [u8],
 ) -> Result<usize> {
     vm.validate_guest_geometry()?;
@@ -106,6 +133,12 @@ pub fn riscv_with_sstc(
     }
     if vm.net_peer.is_some() || vm.net_uplink {
         virtio(&mut f, layout.net, layout.net_irq, vm.aia)?;
+    }
+    if control_events {
+        f.begin(&[b"pauli-control"])?;
+        f.text("compatible", CONTROL_COMPATIBLE)?;
+        device_irq(&mut f, layout.control_irq, vm.aia)?;
+        f.end()?;
     }
     f.end()?;
     f.finish()
@@ -210,6 +243,9 @@ fn device(
     f.at(name, region.base)?;
     f.text("compatible", compatible)?;
     f.reg(region)?;
+    device_irq(f, irq, aia)
+}
+fn device_irq(f: &mut Writer<'_>, irq: u32, aia: bool) -> Result {
     f.u32("interrupt-parent", CONTROLLER)?;
     if aia {
         f.prop(

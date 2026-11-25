@@ -9,6 +9,7 @@ struct Entry {
     sender: VmId,
     epoch: u32,
     message: MailMessage,
+    hint: bool,
 }
 
 pub(crate) struct Mailbox {
@@ -22,6 +23,7 @@ impl Mailbox {
             entries: [Entry {
                 sender: VmId(0),
                 epoch: 0,
+                hint: false,
                 message: MailMessage {
                     tag: 0,
                     len: 0,
@@ -37,6 +39,7 @@ impl Mailbox {
         sender: VmId,
         epoch: u32,
         message: MailMessage,
+        hint: bool,
         current: impl Fn(VmId, u32) -> bool,
     ) -> Result<(), Error> {
         if self.len == INBOX_DEPTH {
@@ -65,6 +68,7 @@ impl Mailbox {
             sender,
             epoch,
             message,
+            hint,
         };
         self.len += 1;
         Ok(())
@@ -92,5 +96,23 @@ impl Mailbox {
 
     pub(crate) fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    pub(crate) fn has_hint(&self) -> bool {
+        self.entries[..self.len].iter().any(|entry| entry.hint)
+    }
+
+    pub(crate) fn clear_hints(&mut self) {
+        for entry in &mut self.entries[..self.len] {
+            entry.hint = false;
+        }
+    }
+
+    pub(crate) fn retract_hints(&mut self, peer: VmId, epoch: u32) {
+        for entry in &mut self.entries[..self.len] {
+            if entry.sender == peer && entry.epoch == epoch {
+                entry.hint = false;
+            }
+        }
     }
 }

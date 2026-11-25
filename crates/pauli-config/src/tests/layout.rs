@@ -35,6 +35,23 @@ fn default_board_abi() {
         [1, 2, 10, 11]
     );
     assert_eq!(board.imsic.size, u64::from(MAX_GUEST_VCPUS) * 4096);
+    assert_eq!(board.control_irq, 12);
+    for source in [
+        0,
+        32,
+        board.uart_irq,
+        board.block_irq,
+        board.net_irq,
+        board.rtc_irq,
+    ] {
+        let invalid = GuestBoardLayout {
+            control_irq: source,
+            ..board
+        };
+        for advanced in [false, true] {
+            assert_eq!(invalid.irq_config(1, advanced), Err(Error::Dtb));
+        }
+    }
 }
 
 #[test]

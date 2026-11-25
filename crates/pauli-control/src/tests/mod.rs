@@ -14,6 +14,7 @@ struct Runtime {
     stats_result: Cell<Result<u64, Error>>,
     log_read: Cell<Option<(VmId, u32, u64)>>,
     mail_call: Cell<Option<mail::Exchange>>,
+    mail_hint: Cell<Option<bool>>,
     mail_result: Cell<Result<MailChunk, Error>>,
     effects: Vec<(VmId, Operation)>,
     fail_boot: bool,
@@ -37,6 +38,7 @@ impl Runtime {
             stats_result: Cell::new(Ok(u64::MAX)),
             log_read: Cell::new(None),
             mail_call: Cell::new(None),
+            mail_hint: Cell::new(None),
             mail_result: Cell::new(Ok(MailChunk {
                 message: None,
                 more: false,
@@ -98,14 +100,16 @@ impl Backend for Runtime {
         self.log_read.set(Some((vm, epoch, cursor)));
         logs::read_sample(cursor)
     }
-    fn mail_send(
+    fn mail_send_with_hint(
         &self,
         vm: VmId,
         epoch: u32,
         peer: VmId,
         peer_epoch: u32,
         message: MailMessage,
+        hint: bool,
     ) -> Result<(), Error> {
+        self.mail_hint.set(Some(hint));
         self.mail_call.set(Some(mail::Exchange {
             local: (vm, epoch),
             peer: (peer, peer_epoch),

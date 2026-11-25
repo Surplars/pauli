@@ -105,7 +105,7 @@ fn host_and_vm_authority_are_independent_and_revocation_is_epoch_scoped() {
     assert_eq!(backend.stats_word.get(), None);
     service.grant_stats(host, 10, &backend).unwrap();
     service.grant_stats(host, 11, &backend).unwrap();
-    service.revoke(host, 10, VmId(1)).unwrap();
+    service.revoke(host, 10, VmId(1), &backend).unwrap();
     assert_eq!(service.execute_call(source, inspect, &mut backend), deny);
     assert_eq!(
         service.execute_call(source, stats, &mut backend).value,
@@ -135,7 +135,7 @@ fn host_and_vm_authority_are_independent_and_revocation_is_epoch_scoped() {
     }
     assert_eq!(backend.stats_word.get(), None);
     service.grant_stats(host, 20, &backend).unwrap();
-    service.retire(20);
+    service.retire(20, &backend);
     assert_eq!(
         service.execute_call(Caller::Guest(20), stats, &mut backend),
         deny

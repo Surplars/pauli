@@ -76,7 +76,7 @@ impl Monitor {
             Command::Revoke(source, target) => {
                 let source = runtime.manager.vm(runtime.manager.find(source)?)?.epoch();
                 let target = VmId(runtime.manager.find(target)? as u32 + 1);
-                self.service.revoke(Caller::Host, source, target).map_err(|_| HvError::Permission)?;
+                self.service.revoke(Caller::Host, source, target, &Target(runtime)).map_err(|_| HvError::Permission)?;
             }
         }
         Ok(())
@@ -101,7 +101,7 @@ impl Monitor {
             let (old_epoch, previous) = vm.notice.record(epoch, state);
             if old_epoch != epoch {
                 if old_epoch != 0 {
-                    self.service.retire(old_epoch);
+                    self.service.retire(old_epoch, &Target(runtime));
                 }
                 self.terminal.output.begin(epoch);
             }
@@ -111,7 +111,7 @@ impl Monitor {
             }
             if previous != Some(state) && state != State::Ready {
                 if previous == Some(State::Ready) {
-                    self.service.retire(epoch);
+                    self.service.retire(epoch, &Target(runtime));
                 }
                 if !self.terminal.output.direct() {
                     if previous.is_some() {

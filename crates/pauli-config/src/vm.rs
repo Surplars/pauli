@@ -36,6 +36,7 @@ impl VmConfig {
             cpu_affinity: CpuAffinity::Automatic,
             exclusive_cpus: false,
             host_stats: false,
+            control_events: false,
             image: VmImage::default(),
             firmware: None,
         })
@@ -52,6 +53,7 @@ impl VmConfig {
             name: Self::new(name)?.name,
             autostart: false,
             host_stats: false,
+            control_events: false,
             ..*self
         })
     }

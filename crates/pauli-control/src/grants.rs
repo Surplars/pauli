@@ -3,14 +3,26 @@
 //! Invariants: no authority without a filled record; reuse revoked space before growing.
 use crate::{Backend, Error, Rights, VmId};
 pub(super) const PER_PAGE: usize = 64;
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum MailWatch {
+    /// No MAIL right, or the target epoch's retirement was already reported.
+    None,
+    /// This grant authorizes its holder to poll for this peer.
+    Peer,
+    /// Both endpoint epochs authorize each other. Arrival may publish a hint.
+    Mutual,
+}
 #[derive(Clone, Copy)]
 pub(super) struct Grant {
     pub source: u32,
+    pub source_vm: VmId,
     pub vm: VmId,
     pub rights: Rights,
     /// LOG and MAIL bind to this incarnation. Lifecycle authority applies
     /// to the configured resource across a cold restart.
     pub target_epoch: u32,
+    /// Maintained on the management owner so sends need no subscriber search.
+    pub mail_watch: MailWatch,
 }
 #[derive(Clone, Copy)]
 pub(super) enum Entry {
@@ -57,6 +69,24 @@ impl GrantPage {
             Some(&mut page.entries)
         })
         .flatten()
+    }
+    pub(super) fn vm_grants_mut(&mut self) -> impl Iterator<Item = &mut Grant> {
+        self.entries_mut()
+            .flatten()
+            .filter_map(|entry| match entry {
+                Entry::Vm(g) => Some(g),
+                Entry::HostStats(_) => None,
+            })
+    }
+    pub(super) fn set_reverse_watch(&mut self, g: Grant, watch: MailWatch) {
+        if g.source == g.target_epoch {
+            return; // A self-grant has only one record.
+        }
+        if let Some(reverse) = self.vm_grants_mut().find(|r| {
+            r.source == g.target_epoch && r.vm == g.source_vm && r.target_epoch == g.source
+        }) {
+            reverse.mail_watch = watch;
+        }
     }
     pub(super) fn set(&mut self, grant: Entry, backend: &impl Backend) -> Result<(), Error> {
         if let Some(old) = self

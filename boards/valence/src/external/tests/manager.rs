@@ -21,6 +21,7 @@ fn trusted_role_alone_selects_the_manager_and_private_service() {
     .unwrap();
     assert!(!plan.management && plan.count() == 1);
     assert!(!plan.boot_stats_for(0));
+    assert!(!plan.vms[0].unwrap().control_events);
     assert_eq!(plan.vms[0].unwrap().name(), "linux");
 
     src.manager = true;
@@ -46,6 +47,15 @@ fn trusted_role_alone_selects_the_manager_and_private_service() {
     assert!(plan.boot_stats_for(0));
     assert!((1..=pauli_config::MAX_BOOT_VMS).all(|slot| !plan.boot_stats_for(slot)));
     assert!(!peer.host_stats);
+    assert!(linux.control_events && !peer.control_events);
+    for (vm, bytes) in [(linux, &linux_tree), (peer, &peer_tree)] {
+        pauli_config::guest_dtb::validate_control_events(
+            &bytes[..vm.dtb_size as usize],
+            &vm,
+            GuestBoardLayout::DEFAULT,
+        )
+        .unwrap();
+    }
     assert_eq!((linux.name(), peer.name()), ("manager", "service"));
     assert_eq!(
         (linux.host_base, linux.memory_size),

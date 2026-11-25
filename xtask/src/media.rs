@@ -237,7 +237,21 @@ fn place(
 fn build_dtbs(config: &mut BootConfig, vms: &[Vm], hz: u32) -> Result<Vec<u8>> {
     let mut dtbs = Vec::new();
     for (slot, vm) in config.vms.iter_mut().flatten().zip(vms) {
-        let bytes = dtb::guest(slot, GuestBoardLayout::DEFAULT, hz, &vm.bootargs)?;
+        let bytes = if slot.control_events {
+            let mut out = vec![0; pauli_config::MAX_GUEST_DTB];
+            let n = wire(pauli_config::guest_dtb::riscv_configured(
+                slot,
+                GuestBoardLayout::DEFAULT,
+                hz,
+                &vm.bootargs,
+                false,
+                &mut out,
+            ))?;
+            out.truncate(n);
+            out
+        } else {
+            dtb::guest(slot, GuestBoardLayout::DEFAULT, hz, &vm.bootargs)?
+        };
         slot.dtb_offset = dtbs.len() as u64;
         slot.dtb_size = bytes.len() as u64;
         dtbs.extend_from_slice(&bytes);

@@ -225,10 +225,10 @@ fn revocation() {
         Err(Error::Denied)
     );
     assert_eq!(
-        service.revoke(Caller::Guest(10), 10, VmId(2)),
+        service.revoke(Caller::Guest(10), 10, VmId(2), &backend),
         Err(Error::Denied)
     );
-    service.revoke(Caller::Host, 10, VmId(2)).unwrap();
+    service.revoke(Caller::Host, 10, VmId(2), &backend).unwrap();
     assert_eq!(
         service.execute(
             Caller::Guest(10),
@@ -261,7 +261,7 @@ fn revocation() {
         service.grant(Caller::Host, 99, VmId(1), Rights::ALL, &backend),
         Err(Error::NoSpace)
     );
-    service.retire(10);
+    service.retire(10, &backend);
     for vm in 1..=4 {
         service
             .grant(Caller::Host, 99, VmId(vm), Rights::ALL, &backend)

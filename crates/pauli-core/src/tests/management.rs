@@ -16,6 +16,8 @@ mod boot_grant;
 #[cfg(feature = "guest-control")]
 mod boot_quota;
 #[cfg(feature = "guest-control")]
+mod events_mail;
+#[cfg(feature = "guest-control")]
 mod mail;
 #[cfg(feature = "guest-control")]
 mod stats;

@@ -22,6 +22,7 @@ fn diskless_firmware_stages_at_the_same_addresses_the_board_will_read() {
         let mut scratch = Scratch::new(&root).unwrap();
         let file = scratch.bytes("control.elf", &example()).unwrap();
         let mut vms = crate::firmware::pair_files(&file, &file, cpus).unwrap();
+        vms[1].config.control_events = true;
         let media = prepare(
             &mut scratch,
             &board,
@@ -56,9 +57,18 @@ fn diskless_firmware_stages_at_the_same_addresses_the_board_will_read() {
             assert_eq!(a.owner(0, 0, boot, n), boot);
             assert_eq!(b.owner(1, 0, boot, n), (boot + 1) % n);
         }
-        assert_eq!(b.cpu_affinity == pauli_config::CpuAffinity::Workers, cpus > 1);
+        assert_eq!(
+            b.cpu_affinity == pauli_config::CpuAffinity::Workers,
+            cpus > 1
+        );
         let bytes = fs::read(&media.loaders[1].path).unwrap();
         let dtb = pauli_hal::fdt::Fdt::new(&bytes[..a.dtb_size as usize]).unwrap();
+        assert!(dtb.find("/pauli-control").unwrap().is_none());
+        let start = b.dtb_offset as usize;
+        let peer = &bytes[start..start + b.dtb_size as usize];
+        assert!(b.control_events && !b.host_stats);
+        pauli_config::guest_dtb::validate_control_events(peer, &b, GuestBoardLayout::DEFAULT)
+            .unwrap();
         assert_eq!(
             dtb.find("/").unwrap().unwrap().text("compatible").unwrap(),
             Some("openion,firmware-guest")

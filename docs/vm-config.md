@@ -234,9 +234,22 @@ creator receives `mail` on the child. Grant the reverse direction separately.
 
 Each inbox admits sixteen messages total and eight per sender incarnation.
 Both limits return SBI invalid state on overflow. Operations are nonblocking
-and exchange only copied scalars. Receivers poll. Queued messages survive
+and exchange only copied scalars. Receivers may poll. Queued messages survive
 the sender stopping or faulting in its current epoch. A cold receiver starts
 with an empty inbox.
+
+Set `control_events = true` in a QEMU boot VM's manifest to enable mailbox
+wakeups. The default is false. The Valence management guest opts in through
+the board's manager configuration. A generated Linux tree describes
+`openion,pauli-control` with interrupt specifier `<12>` for PLIC or
+`<12 4>` for APLIC. A firmware peer can use the same interrupt directly.
+For a supplied DTB, the admitted control device and its wired controller
+are direct children of the root. The interrupt parent must resolve to the
+configured PLIC or APLIC. An opaque tree can boot with this binding, but
+cloning it requires a canonical tree if the child needs a device removed.
+The option enables the device. The host grants the MAIL right separately
+for each direction and guest incarnation. Provisioned children start with
+the device disabled. See [mail notification and guest WFI](architecture.md#mail-notification-and-guest-wfi).
 
 ## Local smoke gate
 

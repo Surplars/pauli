@@ -41,11 +41,19 @@ impl HvArch for RiscvHvArch {
         args: &str,
         out: &mut [u8],
     ) -> Result<usize> {
-        pauli_config::guest_dtb::riscv(config, layout, hz, args, out)
+        pauli_config::guest_dtb::riscv_configured(config, layout, hz, args, false, out)
             .map_err(|_| HvError::InvalidImage)
     }
     fn guest_sstc(dtb: &[u8], vcpus: u8) -> Result<bool> {
         pauli_config::guest_dtb::riscv_sstc(dtb, vcpus).map_err(|_| HvError::InvalidImage)
+    }
+    fn validate_control_events(
+        dtb: &[u8],
+        config: &pauli_config::VmConfig,
+        layout: pauli_config::GuestBoardLayout,
+    ) -> Result<()> {
+        pauli_config::guest_dtb::validate_control_events(dtb, config, layout)
+            .map_err(|_| HvError::InvalidImage)
     }
     fn sstc_available_for_owners(owners: usize) -> bool {
         crate::sstc_available_for_owners(owners)
@@ -57,7 +65,7 @@ impl HvArch for RiscvHvArch {
         args: &str,
         out: &mut [u8],
     ) -> Result<usize> {
-        pauli_config::guest_dtb::riscv_with_sstc(config, layout, hz, args, true, out)
+        pauli_config::guest_dtb::riscv_configured(config, layout, hz, args, true, out)
             .map_err(|_| HvError::InvalidImage)
     }
     fn publish_code() {

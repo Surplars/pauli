@@ -29,11 +29,11 @@ pub fn enable_sstc(vm: &VmConfig, original: &[u8], hz: u32, out: &mut [u8]) -> O
     let chosen = tree.find("/chosen").ok().flatten()?;
     let args = chosen.text("bootargs").ok().flatten()?;
     let layout = GuestBoardLayout::DEFAULT;
-    let plain = guest_dtb::riscv(vm, layout, hz, args, out).ok()?;
+    let plain = guest_dtb::riscv_configured(vm, layout, hz, args, false, out).ok()?;
     if out.get(..plain)? != original {
         return None;
     }
-    guest_dtb::riscv_with_sstc(vm, layout, hz, args, true, out).ok()
+    guest_dtb::riscv_configured(vm, layout, hz, args, true, out).ok()
 }
 
 #[cfg(test)]
@@ -119,5 +119,22 @@ mod tests {
         baseline[offset] = b'X';
         assert!(Fdt::new(&baseline[..plain]).is_ok());
         assert_eq!(enable_sstc(&vm, &baseline[..plain], hz, &mut out), None);
+    }
+
+    #[test]
+    fn canonical_control_tree_keeps_its_event_node_through_sstc_upgrade() {
+        let mut vm = VmConfig::new("peer").unwrap();
+        vm.control_events = true;
+        let layout = GuestBoardLayout::DEFAULT;
+        let (mut baseline, mut upgraded) = ([0; MAX_GUEST_DTB], [0; MAX_GUEST_DTB]);
+        let n = guest_dtb::riscv_configured(&vm, layout, 1, "", false, &mut baseline).unwrap();
+        let used = enable_sstc(&vm, &baseline[..n], 1, &mut upgraded).unwrap();
+        assert_eq!(guest_dtb::riscv_sstc(&upgraded[..used], 1), Ok(true));
+        assert_eq!(
+            guest_dtb::validate_control_events(&upgraded[..used], &vm, layout),
+            Ok(())
+        );
+        vm.control_events = false;
+        assert!(enable_sstc(&vm, &baseline[..n], 1, &mut upgraded).is_none());
     }
 }

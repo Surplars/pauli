@@ -212,7 +212,7 @@ fn both_epochs_authorize_a_read_even_before_retirement_notifications() {
     }
     assert_eq!(b.log_read.get(), None);
     s.grant(Caller::Host, 30, VmId(2), rights, &b).unwrap();
-    s.revoke(Caller::Host, 30, VmId(2)).unwrap();
+    s.revoke(Caller::Host, 30, VmId(2), &b).unwrap();
     assert_eq!(
         read(&mut s, &mut b, 30, 20, 0),
         abi::Return::error(abi::DENIED)

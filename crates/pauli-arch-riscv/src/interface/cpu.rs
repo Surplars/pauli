@@ -200,6 +200,8 @@ fn action(action: SbiAction) -> Result<ExitKind> {
         #[cfg(feature = "guest-control")]
         SbiAction::ManagementProbe => ExitKind::Control(Control::ManagementProbe),
         #[cfg(feature = "guest-control")]
+        SbiAction::Events(control) => ExitKind::Control(Control::Events(control)),
+        #[cfg(feature = "guest-control")]
         SbiAction::Management { args } => ExitKind::Control(Control::Management { args }),
         _ => return Err(HvError::InvalidState),
     })

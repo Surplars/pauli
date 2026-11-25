@@ -4,6 +4,7 @@
 mod aia;
 mod aia_bank;
 mod block_irq;
+mod control_irq;
 mod file_state;
 mod gstage;
 mod imsic_cost;

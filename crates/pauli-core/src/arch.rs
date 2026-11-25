@@ -32,7 +32,9 @@ pub fn cpu_targets(mask: usize, base: usize, count: usize) -> Option<usize> {
 }
 // Transport backends announce the same ABI without importing the policy crate.
 #[cfg(feature = "guest-control")]
-pub use pauli_control::abi::{EID as MANAGEMENT_EID, FEAT_STATS};
+pub use pauli_control::abi::{
+    EID as MANAGEMENT_EID, EVENT_MAIL, EVENTS_MASK, EVENTS_TAKE, FEAT_EVENTS, FEAT_STATS,
+};
 /// # Safety
 /// All arena pointers and RAM mappings must be confined to the resulting
 /// space and its VM. No references may escape a failed build or outlive the
@@ -98,6 +100,13 @@ pub trait GuestIo {
     fn register(&mut self, cpu: u8, access: RegisterAccess) -> Option<usize>;
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "guest-control")]
+pub enum EventControl {
+    Take,
+    Mask(bool),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control {
     Start {
         cpu: usize,
@@ -119,6 +128,8 @@ pub enum Control {
     },
     #[cfg(feature = "guest-control")]
     ManagementProbe,
+    #[cfg(feature = "guest-control")]
+    Events(EventControl),
     #[cfg(feature = "guest-control")]
     Management {
         args: [u64; 6],
@@ -443,6 +454,18 @@ pub trait HvArch: Send + Sync + 'static {
     type IrqMask: LocalIrq;
     fn init(layout: GuestBoardLayout) -> core::result::Result<(), HvError>;
     fn guest_sstc(dtb: &[u8], vcpus: u8) -> Result<bool>;
+    /// Check discovery against the interrupt wire selected for this guest.
+    fn validate_control_events(
+        _dtb: &[u8],
+        config: &VmConfig,
+        _layout: GuestBoardLayout,
+    ) -> Result<()> {
+        if config.control_events {
+            Err(HvError::Unsupported)
+        } else {
+            Ok(())
+        }
+    }
     fn sstc_available_for_owners(owners: usize) -> bool;
     /// Architecture-specific guest discovery, not the physical board's device tree.
     fn write_linux_dtb(

@@ -3,6 +3,7 @@
 [[vm]]
 name = "manager"
 host_stats = true
+control_events = true
 memory_mib = 128
 vcpus = 2
 autostart = true

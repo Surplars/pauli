@@ -18,6 +18,8 @@ use pauli_hal::{
     device::{CompletionEvent, MmioAccess},
     sync::SpinLock,
 };
+mod events;
+use events::ControlEvents;
 /// Stable driver notification targets. Boot VMs may share a read-only disk;
 /// managed disks instead have one exclusive owner, whose VM ID need not be small.
 pub(crate) struct DeviceLinks {
@@ -38,6 +40,7 @@ pub struct IoState {
     pub ram: GuestRam,
     pub console: Console,
     pub(crate) mailbox: Mailbox,
+    control: ControlEvents,
     pub block: Option<Block>,
     pub net: Option<Net>,
     pub rtc: Rtc,
@@ -59,6 +62,7 @@ pub struct VmDevices<I: VirtualIrqChip> {
     pub(super) irq_config: GuestIrqConfig,
     /// UART, block, net and RTC lines in the same order as IoState::levels.
     irq_sources: [u32; 4],
+    control_irq: Option<u32>,
     pub(super) lanes: usize,
 }
 impl<I: VirtualIrqChip> VmDevices<I> {
@@ -84,11 +88,6 @@ impl<I: VirtualIrqChip> VmDevices<I> {
             layout.net_irq,
             layout.rtc_irq,
         ];
-        for (index, source) in irq_sources.iter().enumerate() {
-            if !(1..32).contains(source) || irq_sources[..index].contains(source) {
-                return Err(HvError::InvalidDevice);
-            }
-        }
         let block = bind_block(board, boot, config, slot, links, hz, arena)?;
         let bus = create_bus(layout, config, irq_config.controller, &ram)?;
         let native = if config.net_uplink {
@@ -111,6 +110,7 @@ impl<I: VirtualIrqChip> VmDevices<I> {
                 ram,
                 console: Console::new((hz / 1000).max(1)),
                 mailbox: Mailbox::new(),
+                control: ControlEvents::default(),
                 block,
                 net,
                 rtc: Rtc::new(unix, now, hz),
@@ -121,12 +121,14 @@ impl<I: VirtualIrqChip> VmDevices<I> {
             bus,
             irq_config,
             irq_sources,
+            control_irq: config.control_events.then_some(layout.control_irq),
             lanes: usize::MAX >> (usize::BITS - u32::from(config.vcpus)),
         })
     }
     pub(super) fn replace_chip(&self, io: &mut IoState, chip: I, config: &VmConfig) {
         *self.irqs.lock() = IrqBank::new(chip, config);
         io.levels = [false; 4];
+        io.control = ControlEvents::default();
         self.wake.store(0, Ordering::Relaxed);
     }
     fn levels(&self, io: &mut IoState, exclude: usize) {
@@ -332,6 +334,10 @@ impl<I: VirtualIrqChip> VmDevices<I> {
             net.stop(link)?;
         }
         self.irqs.lock().quiesce()?;
+        if self.control_irq.is_some() {
+            io.control = ControlEvents::default();
+            io.mailbox.clear_hints();
+        }
         Ok(true)
     }
 }

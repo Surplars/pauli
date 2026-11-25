@@ -5,6 +5,19 @@
 use super::*;
 
 #[test]
+fn control_device_bit_roundtrips_independently_of_management_authority() {
+    let mut cfg = fixture();
+    let mut raw = cfg.encode().unwrap();
+    cfg.vms[1].as_mut().unwrap().control_events = true;
+    raw[crate::HEADER + crate::RECORD + 73] |= 0x20;
+    assert_eq!(cfg.encode().unwrap(), raw);
+    let decoded = BootConfig::decode(&raw).unwrap();
+    let peer = decoded.vms[1].unwrap();
+    assert!(peer.control_events && !peer.host_stats && !decoded.boot_stats_for(1));
+    assert!(!peer.renamed("child").unwrap().control_events);
+}
+
+#[test]
 fn host_stats_requires_an_explicit_linux_management_boot_slot() {
     let mut cfg = fixture();
     cfg.smoke_payload = false;

@@ -115,6 +115,9 @@ pub struct VmConfig {
     pub exclusive_cpus: bool,
     /// Trusted boot policy for exposing host counters to the first Linux guest.
     pub host_stats: bool,
+    /// Advertise and wire the control-event interrupt for this boot VM.
+    /// This describes a device, independently of any management grants.
+    pub control_events: bool,
     pub image: VmImage,
     pub firmware: Option<FirmwareLayout>,
 }

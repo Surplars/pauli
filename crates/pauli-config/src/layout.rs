@@ -71,6 +71,7 @@ pub struct GuestBoardLayout {
     pub block_irq: u32,
     pub net_irq: u32,
     pub rtc_irq: u32,
+    pub control_irq: u32,
 }
 
 impl GuestBoardLayout {
@@ -79,6 +80,18 @@ impl GuestBoardLayout {
         use crate::Error;
         if !(1..=crate::MAX_GUEST_VCPUS).contains(&vcpus) {
             return Err(Error::Vcpus);
+        }
+        let sources = [
+            self.uart_irq,
+            self.block_irq,
+            self.net_irq,
+            self.rtc_irq,
+            self.control_irq,
+        ];
+        for (i, source) in sources.iter().enumerate() {
+            if !(1..32).contains(source) || sources[..i].contains(source) {
+                return Err(Error::Dtb);
+            }
         }
         let controller = if advanced {
             let wired = self.aplic;
@@ -172,6 +185,7 @@ impl GuestBoardLayout {
         block_irq: 1,
         net_irq: 2,
         rtc_irq: 11,
+        control_irq: 12,
     };
 }
 

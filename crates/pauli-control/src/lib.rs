@@ -15,8 +15,8 @@ mod tests;
 
 pub mod abi;
 mod grants;
-use grants::Grant;
 pub use grants::GrantPage;
+use grants::{Grant, MailWatch};
 mod provision;
 pub use provision::{ChildName, ChildSpec, DiskSlot, Shape};
 pub mod queue;
@@ -260,6 +260,22 @@ pub trait Backend {
     ) -> Result<MailChunk, Error> {
         Err(Error::Unsupported)
     }
+    /// Enqueue and publish the optional hint together. A true hint authorizes
+    /// publication only for this pair of endpoint incarnations.
+    fn mail_send_with_hint(
+        &self,
+        sender: VmId,
+        source_epoch: u32,
+        target: VmId,
+        target_epoch: u32,
+        message: MailMessage,
+        _hint: bool,
+    ) -> Result<(), Error> {
+        self.mail_send(sender, source_epoch, target, target_epoch, message)
+    }
+    /// Retract only this peer's hints from a receiver's inbox. A backend that
+    /// publishes hints must also notify its active subscriber of binding loss.
+    fn mail_binding_lost(&self, _receiver: VmId, _epoch: u32, _peer: VmId, _peer_epoch: u32) {}
     /// Optional host-only storage for the next batch of grants. Return an empty
     /// page exclusively to this service, or fail before a child is created.
     fn grant_page(&self) -> Result<&'static mut GrantPage, Error> {
@@ -325,25 +341,70 @@ impl Service {
         if caller != Caller::Host {
             return Err(Error::Denied);
         }
-        if !backend.snapshot().any(|info| info.epoch == source) {
-            return Err(Error::NotFound);
-        }
+        let source_vm = backend
+            .snapshot()
+            .find(|info| info.epoch == source)
+            .ok_or(Error::NotFound)?
+            .vm;
         let target_epoch = backend.info(vm)?.epoch;
-        self.grants.set(
-            grants::Entry::Vm(Grant {
-                source,
-                vm,
-                rights,
-                target_epoch,
-            }),
-            backend,
-        )?;
+        let old = self.grants.vm_grant(source, vm);
+        let mail_watch = if !rights.contains(Rights::MAIL) {
+            MailWatch::None
+        } else if source == target_epoch
+            || self
+                .grants
+                .vm_grant(target_epoch, source_vm)
+                .is_some_and(|reverse| {
+                    reverse.target_epoch == source && reverse.rights.contains(Rights::MAIL)
+                })
+        {
+            MailWatch::Mutual
+        } else {
+            MailWatch::Peer
+        };
+        let grant = Grant {
+            source,
+            source_vm,
+            vm,
+            rights,
+            target_epoch,
+            mail_watch,
+        };
+        self.grants.set(grants::Entry::Vm(grant), backend)?;
+        if let Some(old) =
+            old.filter(|g| g.target_epoch != target_epoch || mail_watch == MailWatch::None)
+        {
+            self.withdraw_mail(old, backend);
+        }
+        if mail_watch == MailWatch::Mutual {
+            self.grants.set_reverse_watch(grant, MailWatch::Mutual);
+        }
         Ok(())
     }
 
-    pub fn revoke(&mut self, caller: Caller, source: u32, vm: VmId) -> Result<(), Error> {
+    fn withdraw_mail(&mut self, grant: Grant, backend: &impl Backend) {
+        if grant.mail_watch == MailWatch::None {
+            return;
+        }
+        backend.mail_binding_lost(grant.source_vm, grant.source, grant.vm, grant.target_epoch);
+        if grant.mail_watch == MailWatch::Mutual && grant.source != grant.target_epoch {
+            self.grants.set_reverse_watch(grant, MailWatch::Peer);
+            backend.mail_binding_lost(grant.vm, grant.target_epoch, grant.source_vm, grant.source);
+        }
+    }
+
+    pub fn revoke(
+        &mut self,
+        caller: Caller,
+        source: u32,
+        vm: VmId,
+        backend: &impl Backend,
+    ) -> Result<(), Error> {
         if caller != Caller::Host {
             return Err(Error::Denied);
+        }
+        if let Some(old) = self.grants.vm_grant(source, vm) {
+            self.withdraw_mail(old, backend);
         }
         self.grants
             .remove(|entry| entry.key() == (source, Some(vm)));
@@ -352,7 +413,22 @@ impl Service {
 
     /// Owner notification for guest shutdown/fault, or epoch retirement. No
     /// authority silently transfers to the replacement guest in the same slot.
-    pub fn retire(&mut self, source: u32) {
+    pub fn retire(&mut self, source: u32, backend: &impl Backend) {
+        // Each record represents one watcher, even without reciprocal MAIL.
+        // Retain incoming rights to the terminal inbox but report this loss once.
+        for grant in self.grants.vm_grants_mut() {
+            if grant.mail_watch != MailWatch::None
+                && (grant.source == source || grant.target_epoch == source)
+            {
+                backend.mail_binding_lost(
+                    grant.source_vm,
+                    grant.source,
+                    grant.vm,
+                    grant.target_epoch,
+                );
+                grant.mail_watch = MailWatch::None;
+            }
+        }
         self.grants.remove(|entry| entry.key().0 == source);
     }
 
@@ -425,7 +501,14 @@ impl Service {
                     if !message.canonical() {
                         return Err(Error::Invalid);
                     }
-                    backend.mail_send(source, grant.source, before.vm, before.epoch, message)?;
+                    backend.mail_send_with_hint(
+                        source,
+                        grant.source,
+                        before.vm,
+                        before.epoch,
+                        message,
+                        grant.mail_watch == MailWatch::Mutual,
+                    )?;
                 } else {
                     mail =
                         Some(backend.mail_recv(source, grant.source, before.vm, before.epoch)?);
@@ -439,13 +522,13 @@ impl Service {
                 // Revoke old credentials even when activation did not succeed.
                 let after = backend.info(request.vm)?;
                 if after.epoch != before.epoch {
-                    self.retire(before.epoch);
+                    self.retire(before.epoch, backend);
                 }
                 (after, result?)
             }
             Operation::Stop => {
                 backend.stop(request.vm)?;
-                self.retire(before.epoch);
+                self.retire(before.epoch, backend);
                 (backend.info(request.vm)?, before.active)
             }
             Operation::Console | Operation::Input(_) => {

@@ -47,6 +47,14 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 value: pauli_control::abi::probe(self.manager.capacity() as u32),
             },
             #[cfg(feature = "guest-control")]
+            Control::Events(control) => match vm.control_event(control, current.index) {
+                Ok(value) => {
+                    vm.deliver_wakes();
+                    Reply::Transport { error: 0, value }
+                }
+                Err(error) => Reply::Transport { error, value: 0 },
+            },
+            #[cfg(feature = "guest-control")]
             Control::Management { args } => {
                 match crate::monitor::rpc::submit(self, vm.slot, current.index, vm.epoch(), args) {
                     Ok(ticket) => {

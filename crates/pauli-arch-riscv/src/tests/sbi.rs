@@ -82,10 +82,60 @@ fn management_features_reports_protocol_only_and_requires_six_zero_arguments() {
         } else if nonzero.is_some() {
             (sbi::INVALID_PARAM as usize, 0)
         } else {
-            (0, 1)
+            (0, 3)
         };
         assert_eq!((ctx.x[10], ctx.x[11]), expected);
         assert_eq!(ctx.pc, trap.pc + 4);
+    }
+}
+
+#[test]
+fn direct_events_accept_only_self_take_or_mail_mask_and_commit_once() {
+    #[cfg(feature = "guest-control")]
+    use pauli_core::arch::EventControl;
+    let mut cases = std::vec![[0; 6], [1, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]];
+    for (word, value) in [
+        (0, 2),
+        (0, usize::MAX),
+        (1, 1),
+        (2, 1),
+        (3, 1),
+        (4, 1),
+        (5, 1),
+    ] {
+        let mut args = [0; 6];
+        args[word] = value;
+        cases.push(args);
+    }
+    for reserved in [2, 4, 8, 9, usize::MAX] {
+        cases.push([1, reserved, 0, 0, 0, 0]);
+    }
+    for args in cases {
+        let mut ctx = call(0x0800_4f49, 3, [0; 3]);
+        ctx.x[10..16].copy_from_slice(&args);
+        let trap = exit(&ctx);
+        let action = sbi::handle_ecall_mode(&mut ctx, trap, true).unwrap();
+        #[cfg(feature = "guest-control")]
+        if let Some(command) = match args {
+            [0, 0, 0, 0, 0, 0] => Some(EventControl::Take),
+            [1, mask @ (0 | 1), 0, 0, 0, 0] => Some(EventControl::Mask(mask != 0)),
+            _ => None,
+        } {
+            assert_eq!(action, SbiAction::Events(command));
+            assert_eq!(ctx.pc, trap.pc);
+            assert_eq!(ctx.x[10..16], args);
+            continue;
+        }
+        assert_eq!(action, SbiAction::Resume);
+        let error = if cfg!(feature = "guest-control") {
+            sbi::INVALID_PARAM
+        } else {
+            sbi::NOT_SUPPORTED
+        };
+        assert_eq!(
+            (ctx.x[10] as isize, ctx.x[11], ctx.pc),
+            (error, 0, trap.pc + 4)
+        );
     }
 }
 

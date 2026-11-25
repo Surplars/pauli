@@ -13,6 +13,16 @@ mod notification;
 mod parked;
 mod shared_fence;
 
+#[cfg(not(feature = "guest-control"))]
+#[test]
+fn absent_event_implementation_rejects_only_the_opted_in_boot_vm() {
+    let fixture = Fixture::with_config(1, [1; 2], 0, |slot, vm| vm.control_events = slot == 0);
+    let manager = &fixture.runtime.manager;
+    assert_eq!(manager.errors[0], Some(crate::HvError::Unsupported));
+    assert!(manager.vm(0).is_err());
+    assert!(manager.vm(1).is_ok());
+}
+
 fn counts(vm: &Vm<Arch>) -> (usize, usize, usize) {
     let chip = vm.devices.irqs.lock();
     (chip.samples.get(), chip.loads, chip.puts)

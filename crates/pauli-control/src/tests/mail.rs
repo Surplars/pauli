@@ -16,6 +16,42 @@ const EMPTY: MailMessage = MailMessage {
 };
 
 #[test]
+fn hints_follow_both_exact_epochs_when_one_slot_is_rebound_before_retirement() {
+    let mut service = Service::new();
+    let mut backend = Runtime::new();
+    let grant = |s: &mut Service, b: &Runtime, source, target| {
+        s.grant(Caller::Host, source, VmId(target), Rights::MAIL, b)
+            .unwrap();
+    };
+    let send = |s: &mut Service, b: &mut Runtime, source, target, epoch| {
+        let req = request(target, epoch, Operation::MailSend(EMPTY));
+        s.execute(Caller::Guest(source), req, b)
+            .map(|_| b.mail_hint.take().unwrap())
+    };
+    grant(&mut service, &backend, 10, 2);
+    grant(&mut service, &backend, 11, 1);
+    assert_eq!(send(&mut service, &mut backend, 11, 1, 10), Ok(true));
+    backend.row(VmId(2)).epoch = 25;
+    grant(&mut service, &backend, 25, 1);
+    assert_eq!(send(&mut service, &mut backend, 25, 1, 10), Ok(false));
+    assert_eq!(
+        send(&mut service, &mut backend, 10, 2, 0),
+        Err(Error::StaleEpoch)
+    );
+    grant(&mut service, &backend, 10, 2);
+    assert_eq!(send(&mut service, &mut backend, 10, 2, 25), Ok(true));
+    assert_eq!(send(&mut service, &mut backend, 25, 1, 10), Ok(true));
+    service.retire(11, &backend);
+    assert_eq!(send(&mut service, &mut backend, 25, 1, 10), Ok(true));
+    service.retire(10, &backend);
+    assert_eq!(send(&mut service, &mut backend, 25, 1, 10), Ok(false));
+    assert_eq!(
+        send(&mut service, &mut backend, 10, 2, 25),
+        Err(Error::Denied)
+    );
+}
+
+#[test]
 fn wire_round_trip_preserves_binary_messages_and_distinguishes_empty_from_present() {
     assert_eq!((abi::MAIL_SEND, abi::MAIL_RECV), (9, 10));
     let mut service = Service::new();

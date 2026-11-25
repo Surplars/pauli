@@ -3,8 +3,93 @@
 //! Invariants: no out-of-bounds output, overlapping mappings or wrapped offsets.
 use crate::{
     Error, FirmwareLayout, GuestBoardLayout, MAX_GUEST_DTB, MAX_GUEST_VCPUS, VmConfig,
-    guest_dtb::{riscv, riscv_with_sstc},
+    guest_dtb::{riscv, riscv_configured, riscv_sstc, riscv_with_sstc, validate_control_events},
 };
+
+#[test]
+fn control_node_follows_the_explicit_option_and_the_selected_controller() {
+    use pauli_hal::fdt::Fdt;
+    let mut vm = VmConfig::new("peer").unwrap();
+    let mut layout = GuestBoardLayout::DEFAULT;
+    layout.control_irq = 17;
+    let (mut old, mut buf) = ([0; MAX_GUEST_DTB], [0; MAX_GUEST_DTB]);
+    for aia in [false, true] {
+        vm.aia = aia;
+        for sstc in [false, true] {
+            vm.control_events = false;
+            let old_len = riscv_with_sstc(&vm, layout, 1, "", sstc, &mut old).unwrap();
+            let n = riscv_configured(&vm, layout, 1, "", sstc, &mut buf).unwrap();
+            assert_eq!(&buf[..n], &old[..old_len]);
+            vm.control_events = true;
+            let n = riscv_with_sstc(&vm, layout, 1, "", sstc, &mut buf).unwrap();
+            assert_eq!(&buf[..n], &old[..old_len]); // Legacy writer always suppresses this opt-in.
+            assert_eq!(
+                validate_control_events(&buf[..n], &vm, layout),
+                Err(Error::Dtb)
+            );
+            let n = riscv_configured(&vm, layout, 1, "", sstc, &mut buf).unwrap();
+            let bytes = &buf[..n];
+            assert_eq!(riscv_sstc(bytes, 1), Ok(sstc));
+            assert_eq!(validate_control_events(bytes, &vm, layout), Ok(()));
+            let node = Fdt::new(bytes)
+                .unwrap()
+                .find("/pauli-control")
+                .unwrap()
+                .unwrap();
+            assert_eq!(node.reg().unwrap(), None);
+            assert_eq!(
+                node.text("compatible").unwrap(),
+                Some("openion,pauli-control")
+            );
+            assert_eq!(node.u32("interrupt-parent").unwrap(), Some(1));
+            let spec = node.property("interrupts").unwrap().unwrap();
+            let expected = [0, 0, 0, 17, 0, 0, 0, 4];
+            assert_eq!(spec, &expected[..if aia { 8 } else { 4 }]);
+            vm.control_events = false;
+            assert_eq!(validate_control_events(bytes, &vm, layout), Err(Error::Dtb));
+        }
+    }
+}
+
+#[test]
+fn opaque_control_tree_requires_the_configured_source_and_an_actual_matching_parent() {
+    use pauli_hal::fdt::Fdt;
+    let mut vm = VmConfig::new("opaque").unwrap();
+    vm.control_events = true;
+    vm.aia = true;
+    let layout = GuestBoardLayout::DEFAULT;
+    let mut buf = [0; MAX_GUEST_DTB];
+    let n = riscv_configured(&vm, layout, 1, "", false, &mut buf).unwrap();
+    let model = buf[..n].windows(7).position(|v| v == b"OpenIon").unwrap();
+    buf[model] = b'X';
+    assert_eq!(validate_control_events(&buf[..n], &vm, layout), Ok(()));
+    for (path, property, byte) in [
+        ("/pauli-control", "interrupt-parent", 3),
+        ("/pauli-control", "interrupts", 3),
+        ("/pauli-control", "interrupts", 7),
+        ("/aplic@c000000", "phandle", 3),
+        ("/aplic@c000000", "reg", 7),
+        ("/aplic@c000000", "#interrupt-cells", 3),
+        ("/cpus/cpu@0/interrupt-controller", "phandle", 3),
+    ] {
+        let node = Fdt::new(&buf[..n]).unwrap().find(path).unwrap().unwrap();
+        let pos = node.property(property).unwrap().unwrap().as_ptr() as usize
+            - buf.as_ptr() as usize
+            + byte;
+        let original = buf[pos];
+        buf[pos] = if path.starts_with("/cpus/") {
+            1
+        } else {
+            original ^ 1
+        };
+        assert_eq!(
+            validate_control_events(&buf[..n], &vm, layout),
+            Err(Error::Dtb),
+            "{path} {property}"
+        );
+        buf[pos] = original;
+    }
+}
 
 #[test]
 fn exact_sized_buffers_match_staging_and_short_buffers_never_touch_neighbors() {

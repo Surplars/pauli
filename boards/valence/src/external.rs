@@ -57,6 +57,7 @@ fn linux(input: &External<'_>, header: &[u8]) -> Result<VmConfig> {
     }
     vm.aia = input.aia;
     vm.host_stats = input.manager;
+    vm.control_events = input.manager;
     let file_size = input.image.size() as u64;
     vm.image = VmImage {
         kernel_source: input.image.base() as u64,
@@ -94,7 +95,7 @@ fn service(code: PhysRange, host: u64) -> Result<VmConfig> {
 }
 
 fn render(vm: &mut VmConfig, args: &str, out: &mut [u8], layout: GuestBoardLayout) -> Result<()> {
-    vm.dtb_size = pauli_config::guest_dtb::riscv_with_sstc(
+    vm.dtb_size = pauli_config::guest_dtb::riscv_configured(
         vm,
         layout,
         TIMEBASE_HZ as u32,

@@ -169,6 +169,7 @@ unsafe impl Stage2Space for Space {
 #[derive(Default)]
 pub struct Irqs {
     pub lines: [bool; MAX_VCPUS],
+    pub control_lane: usize,
     pub uart_assertions: usize,
     pub samples: Cell<usize>,
     pub loads: usize,
@@ -195,6 +196,10 @@ impl VirtualIrqChip for Irqs {
         Some(0)
     }
     fn set_level(&mut self, source: u32, asserted: bool) {
+        if source == pauli_config::GuestBoardLayout::DEFAULT.control_irq {
+            self.lines[self.control_lane] = asserted;
+            return;
+        }
         if asserted && source == pauli_config::GuestBoardLayout::DEFAULT.uart_irq {
             self.uart_assertions += 1;
         }
@@ -226,6 +231,17 @@ impl HvArch for Arch {
         }
         pauli_config::guest_dtb::riscv_sstc(dtb, vcpus).map_err(|_| HvError::InvalidImage)
     }
+    fn validate_control_events(
+        dtb: &[u8],
+        config: &VmConfig,
+        layout: pauli_config::GuestBoardLayout,
+    ) -> Result<()> {
+        if dtb == [0xd1; 64] {
+            return Ok(()); // The model's synthetic device fixture has no DTB.
+        }
+        pauli_config::guest_dtb::validate_control_events(dtb, config, layout)
+            .map_err(|_| HvError::InvalidImage)
+    }
     fn write_linux_dtb(
         config: &VmConfig,
         layout: pauli_config::GuestBoardLayout,
@@ -233,7 +249,7 @@ impl HvArch for Arch {
         args: &str,
         out: &mut [u8],
     ) -> Result<usize> {
-        pauli_config::guest_dtb::riscv(config, layout, hz, args, out)
+        pauli_config::guest_dtb::riscv_configured(config, layout, hz, args, false, out)
             .map_err(|_| HvError::InvalidImage)
     }
     fn write_extended_linux_dtb(
@@ -243,7 +259,7 @@ impl HvArch for Arch {
         args: &str,
         out: &mut [u8],
     ) -> Result<usize> {
-        pauli_config::guest_dtb::riscv_with_sstc(config, layout, hz, args, true, out)
+        pauli_config::guest_dtb::riscv_configured(config, layout, hz, args, true, out)
             .map_err(|_| HvError::InvalidImage)
     }
     fn init(_layout: pauli_config::GuestBoardLayout) -> Result<()> {

@@ -43,8 +43,8 @@ impl<A: HvArch> VmManager<A> {
         let reshape = config.memory_size != source.config.memory_size
             || config.vcpus != source.config.vcpus
             || spec.disk.is_some();
-        // Firmware's linked layout, immutable DTB and W^X page partition are
-        // one contract. Reuse it unchanged; never feed it to the Linux DTB builder.
+        // Firmware's linked load addresses and W^X page partition are fixed.
+        // Only discovery for an explicitly omitted optional device may change.
         if config.firmware.is_some() && reshape {
             return Err(HvError::Unsupported);
         }
@@ -63,11 +63,13 @@ impl<A: HvArch> VmManager<A> {
             config.owner_mask_excluding(slot, info.boot_cpu, info.host_cpus, self.exclusive_owners);
         let target_sstc = config.firmware.is_none() && A::sstc_available_for_owners(owners);
         let source_sstc = source.guest_sstc();
-        let mut change = (reshape || source_sstc != target_sstc).then_some(shape::DtbChange {
-            source_sstc,
-            target_sstc,
-            optional: !reshape && !source_sstc,
-        });
+        let discovery_changed = reshape || config.control_events != source.config.control_events;
+        let mut change =
+            (discovery_changed || source_sstc != target_sstc).then_some(shape::DtbChange {
+                source_sstc,
+                target_sstc,
+                optional: !discovery_changed && !source_sstc,
+            });
         let metadata = Vm::<A>::vcpu_arena_bytes(config.vcpus)?
             + if config.disk.is_some() {
                 crate::backends::block::BUFFER_BYTES

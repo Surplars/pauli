@@ -7,7 +7,7 @@
 use super::{VCpuContext, VmExit};
 use crate::VmResetKind;
 #[cfg(feature = "guest-control")]
-use pauli_core::arch::MANAGEMENT_EID;
+use pauli_core::arch::{EventControl, MANAGEMENT_EID};
 
 pub const BASE: usize = 0x10;
 pub const SRST: usize = 0x5352_5354;
@@ -56,6 +56,8 @@ pub enum SbiAction {
     },
     #[cfg(feature = "guest-control")]
     ManagementProbe,
+    #[cfg(feature = "guest-control")]
+    Events(EventControl),
     #[cfg(feature = "guest-control")]
     Management {
         args: [u64; 6],
@@ -110,8 +112,27 @@ pub fn handle_ecall_mode(
             } else if fid == 0 {
                 return Ok(SbiAction::ManagementProbe);
             } else {
-                (0, pauli_core::arch::FEAT_STATS as usize)
+                (
+                    0,
+                    (pauli_core::arch::FEAT_STATS | pauli_core::arch::FEAT_EVENTS) as usize,
+                )
             }
+        }
+        #[cfg(feature = "guest-control")]
+        (eid, 3) if eid == MANAGEMENT_EID as usize => {
+            use pauli_core::arch::{EVENT_MAIL, EVENTS_MASK, EVENTS_TAKE};
+            // The VM owner completes a valid self-only operation synchronously.
+            // Leave its PC and arguments intact until the result is committed.
+            if ctx.x[12..16] == [0; 4] {
+                match (ctx.x[10] as u64, ctx.x[11] as u64) {
+                    (EVENTS_TAKE, 0) => return Ok(SbiAction::Events(EventControl::Take)),
+                    (EVENTS_MASK, bits) if bits & !EVENT_MAIL == 0 => {
+                        return Ok(SbiAction::Events(EventControl::Mask(bits != 0)));
+                    }
+                    _ => {}
+                }
+            }
+            (INVALID_PARAM, 0)
         }
         (BASE, 0) => (0, 3), // ABI v0.3; only advertised optional EIDs exist.
         (BASE, 1) => (0, IMPLEMENTATION_ID),

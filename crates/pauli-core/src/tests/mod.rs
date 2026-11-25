@@ -3,6 +3,8 @@
 //! Invariants: boundary rejection is side-effect free and state transitions are bounded.
 mod capacity;
 mod console_rx;
+#[cfg(feature = "guest-control")]
+mod control_events;
 mod direct_console;
 mod dispatch_irq;
 mod fence_report;

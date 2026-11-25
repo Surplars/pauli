@@ -87,18 +87,24 @@ impl Service {
         // Reserve room for the creator's authority before any irreversible effect.
         let child_grant = match caller {
             Caller::Host => None,
-            Caller::Guest(source) => Some((source, self.grants.vacant(backend)?)),
+            Caller::Guest(source) => Some((
+                source,
+                sponsor.ok_or(Error::Denied)?,
+                self.grants.vacant(backend)?,
+            )),
         };
         let info = backend.create(sponsor, template, spec)?;
-        if let Some((source, entry)) = child_grant {
+        if let Some((source, source_vm, entry)) = child_grant {
             *entry = Some(grants::Entry::Vm(Grant {
                 source,
+                source_vm,
                 vm: info.vm,
                 rights: Rights::ALL
                     .union(Rights::DESTROY)
                     .union(Rights::LOG)
                     .union(Rights::MAIL),
                 target_epoch: info.epoch,
+                mail_watch: MailWatch::Peer,
             }));
         }
         Ok(Reply {
@@ -117,10 +123,8 @@ impl Service {
         backend.destroy(before.vm, before.epoch)?;
         // Both directions matter: a newly allocated slot is not the old target,
         // even for other live managers that can inspect its replacement epoch.
-        self.grants.remove(|entry| {
-            let (source, vm) = entry.key();
-            vm == Some(before.vm) || source == before.epoch
-        });
+        self.retire(before.epoch, backend);
+        self.grants.remove(|entry| entry.key().1 == Some(before.vm));
         Ok(Reply {
             info: before,
             changed: true,

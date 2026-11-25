@@ -51,6 +51,7 @@ impl BootConfig {
                     | (u64::from(vm.aia) << 10)
                     | (u64::from(vm.exclusive_cpus) << 11)
                     | (u64::from(vm.host_stats) << 12)
+                    | (u64::from(vm.control_events) << 13)
                     | vm.firmware.map_or(0, |f| {
                         (u64::from(f.rx_pages) << RX_SHIFT) | (u64::from(f.ro_pages) << RO_SHIFT)
                     }),
@@ -168,7 +169,7 @@ fn decode_vm(raw: &[u8; WIRE_SIZE], start: usize) -> Result<VmConfig, Error> {
     let flags = get(raw, start + 72);
     let rx_pages = ((flags >> RX_SHIFT) & PAGE_COUNT_MASK) as u16;
     let ro_pages = ((flags >> RO_SHIFT) & PAGE_COUNT_MASK) as u16;
-    if flags & !(0x1fff | (PAGE_COUNT_MASK << RX_SHIFT) | (PAGE_COUNT_MASK << RO_SHIFT)) != 0
+    if flags & !(0x3fff | (PAGE_COUNT_MASK << RX_SHIFT) | (PAGE_COUNT_MASK << RO_SHIFT)) != 0
         || (rx_pages == 0 && ro_pages != 0)
         || (flags & 2 == 0 && flags & 0x300 != 0)
         || (flags & 8 == 0 && flags & 0x30 != 0)
@@ -184,6 +185,7 @@ fn decode_vm(raw: &[u8; WIRE_SIZE], start: usize) -> Result<VmConfig, Error> {
     vm.aia = flags & 0x400 != 0;
     vm.exclusive_cpus = flags & 0x800 != 0;
     vm.host_stats = flags & 0x1000 != 0;
+    vm.control_events = flags & 0x2000 != 0;
     vm.firmware = (rx_pages != 0).then_some(FirmwareLayout { rx_pages, ro_pages });
     (vm.vcpus, vm.cpu_affinity) = read_placement(get(raw, start + 80), get(raw, start + 88))?;
     vm.image = VmImage {

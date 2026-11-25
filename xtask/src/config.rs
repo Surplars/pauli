@@ -200,6 +200,7 @@ fn parse_vm(table: &Table, dir: &Path, slot: usize) -> Result<Vm> {
             "cpu_affinity",
             "exclusive_cpus",
             "host_stats",
+            "control_events",
             "bootargs",
             "kernel",
             "kernel_sha256",
@@ -229,6 +230,7 @@ fn parse_vm(table: &Table, dir: &Path, slot: usize) -> Result<Vm> {
     config.cpu_affinity = affinity(table.get("cpu_affinity"), config.vcpus)?;
     config.exclusive_cpus = boolean(table, "exclusive_cpus", false)?;
     config.host_stats = boolean(table, "host_stats", false)?;
+    config.control_events = boolean(table, "control_events", false)?;
     ensure!(
         !config.host_stats || (slot == 0 && firmware.is_none()),
         "host_stats requires a Linux guest in boot slot zero"
@@ -356,8 +358,13 @@ fn only_an_explicit_first_linux_entry_can_request_host_stats() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../configs/vm");
     let (sample, _) = profile(&dir.join("manager.toml")).unwrap();
     assert!(sample[0].config.host_stats && !sample[1].config.host_stats);
+    assert!(sample[0].config.control_events && !sample[1].config.control_events);
     let mut entry: Table = "name = 'manager'".parse().unwrap();
     assert!(!parse_vm(&entry, &dir, 0).unwrap().config.host_stats);
+    assert!(!parse_vm(&entry, &dir, 0).unwrap().config.control_events);
+    entry.insert("control_events".into(), Value::Boolean(true));
+    let peer = parse_vm(&entry, &dir, 1).unwrap().config;
+    assert!(peer.control_events && !peer.host_stats);
     entry.insert("host_stats".into(), Value::Boolean(true));
     assert!(parse_vm(&entry, &dir, 0).unwrap().config.host_stats);
     assert!(parse_vm(&entry, &dir, 1).is_err());

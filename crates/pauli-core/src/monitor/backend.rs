@@ -91,6 +91,17 @@ impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
         target_epoch: u32,
         message: MailMessage,
     ) -> Result<(), Error> {
+        self.mail_send_with_hint(sender, source_epoch, target, target_epoch, message, false)
+    }
+    fn mail_send_with_hint(
+        &self,
+        sender: VmId,
+        source_epoch: u32,
+        target: VmId,
+        target_epoch: u32,
+        message: MailMessage,
+        hint: bool,
+    ) -> Result<(), Error> {
         let sender_vm = self.vm(sender)?;
         let target_vm = self.vm(target)?;
         let mut io = target_vm.devices.io.lock();
@@ -100,11 +111,25 @@ impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
         if !target_vm.lifecycle.can_enter() {
             return Err(Error::NotActive);
         }
-        io.mailbox.send(sender, source_epoch, message, |id, epoch| {
-            // Only pins and epoch loads, no other VM's I/O lock. The manager is
-            // the sole writer of the directory and cold epochs for this RPC.
-            self.vm(id).is_ok_and(|vm| vm.epoch() == epoch)
-        })
+        let events = target_vm.config.control_events;
+        let result = io.mailbox.send(
+            sender,
+            source_epoch,
+            message,
+            events && hint,
+            |id, epoch| {
+                // Only pins and epoch loads, no other VM's I/O lock. The manager is
+                // the sole writer of the directory and cold epochs for this RPC.
+                self.vm(id).is_ok_and(|vm| vm.epoch() == epoch)
+            },
+        );
+        // Full-inbox cleanup may have discarded a stale marker even on Busy.
+        if events {
+            target_vm.devices.refresh_control_event(&mut io);
+            drop(io);
+            target_vm.deliver_wakes();
+        }
+        result
     }
     fn mail_recv(
         &self,
@@ -119,7 +144,31 @@ impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
         if receiver.epoch() != receiver_epoch || peer_vm.epoch() != peer_epoch {
             return Err(Error::StaleEpoch);
         }
-        Ok(io.mailbox.recv(peer, peer_epoch))
+        let result = io.mailbox.recv(peer, peer_epoch);
+        if receiver.config.control_events && result.message.is_some() {
+            receiver.devices.refresh_control_event(&mut io);
+            drop(io);
+            receiver.deliver_wakes();
+        }
+        Ok(result)
+    }
+    fn mail_binding_lost(&self, receiver: VmId, epoch: u32, peer: VmId, peer_epoch: u32) {
+        let Ok(vm) = self.vm(receiver) else { return };
+        if !vm.config.control_events {
+            return;
+        }
+        let mut io = vm.devices.io.lock();
+        if vm.epoch() != epoch {
+            return;
+        }
+        io.mailbox.retract_hints(peer, peer_epoch);
+        if vm.lifecycle.can_enter() {
+            vm.devices.invalidate_control_event(&mut io);
+        } else {
+            vm.devices.refresh_control_event(&mut io);
+        }
+        drop(io);
+        vm.deliver_wakes();
     }
     fn input(&mut self, vm: VmId, byte: u8) -> core::result::Result<(), Error> {
         let vm = self
