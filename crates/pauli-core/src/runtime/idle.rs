@@ -54,7 +54,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
     }
 
     fn firmware_wait(&self, owner: usize, manager: bool) -> Wait {
-        if !self.firmware_only {
+        if !self.firmware_only && !(B::IDLE_USE_GUEST_DEADLINE && self.diskless_single_hart) {
             return Wait::Poll;
         }
         if manager && (self.board.info().host_cpus != 1 || !B::IRQ_DRIVEN_CONSOLE) {
@@ -62,6 +62,15 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         }
         let (mut guest, mut alarm, mut fast_io) = (None::<u64>, None::<u64>, false);
         for vm in self.manager.vms() {
+            if !self.firmware_only
+                && (vm.config.firmware.is_some()
+                    || vm.config.vcpus != 1
+                    || vm.config.disk.is_some()
+                    || vm.config.net_uplink
+                    || vm.config.net_peer.is_some())
+            {
+                return Wait::Poll;
+            }
             let Some(slot) = vm.cpu(0).filter(|slot| slot.owner == owner) else {
                 continue;
             };
@@ -111,7 +120,23 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
         }
     }
 
+    pub(super) fn console_input_ready(&self) -> bool {
+        // In direct mode only slot zero consumes native input. If its FIFO is
+        // full, the guest must run before a monitor pass can make progress.
+        self.board.console_rx_queued()
+            && (!self.board.direct_linux_console()
+                || self.manager.available(0).is_none_or(|vm| {
+                    !vm.lifecycle.can_enter() || vm.devices.io.lock().console.uart.rx_has_room()
+                }))
+    }
+
     pub fn idle<R: Tracer>(&self, local: &mut Dispatcher<A::Timer, R>) -> Result<()> {
+        // A service deadline expired before the runnable lane could enter.
+        // Return to the monitor directly; this was neither a guest turn nor WFI.
+        if B::IDLE_USE_GUEST_DEADLINE && self.service_due.load(Ordering::Relaxed) {
+            self.service_due.store(false, Ordering::Relaxed);
+            return Ok(());
+        }
         let info = self.board.info();
         let owner = A::Smp::cpu_id();
         let manager = owner == info.boot_cpu;
@@ -121,7 +146,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             // the byte since the last monitor pass. Do not sleep on that work.
             if manager
                 && matches!(plan, Wait::QuietMonitor | Wait::Until { .. })
-                && self.board.console_rx_queued()
+                && self.console_input_ready()
             {
                 return Ok(());
             }
@@ -161,10 +186,15 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             }
             // SAFETY: masked local IRQs, no live guest bank; a pending IPI survives to WFI.
             unsafe {
+                let mut interval = arch::TickInterval::default();
+                let sample = R::MEASURE_ELAPSED.then_some(&mut interval);
                 #[cfg(not(feature = "selftest"))]
-                A::Smp::idle();
+                arch::TickInterval::measure(sample, A::Timer::now, || A::Smp::idle());
                 #[cfg(feature = "selftest")]
-                self.observe_idle(owner, !timed, guest_compare);
+                self.observe_idle(owner, !timed, guest_compare, sample);
+                if R::MEASURE_ELAPSED {
+                    local.tracer.on_idle_end(interval.end, interval.elapsed());
+                }
             }
             Ok(())
         })

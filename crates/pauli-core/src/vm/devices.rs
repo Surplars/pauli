@@ -244,7 +244,7 @@ impl<I: VirtualIrqChip> VmDevices<I> {
         clock: impl FnOnce() -> u64,
         link: &SpinLock<Link>,
     ) -> Option<usize> {
-        self.access_io(origin, access, clock, link).0
+        self.access_io(origin, access, clock, link, None).0
     }
     fn access_io(
         &self,
@@ -252,6 +252,7 @@ impl<I: VirtualIrqChip> VmDevices<I> {
         access: MmioAccess,
         clock: impl FnOnce() -> u64,
         link: &SpinLock<Link>,
+        service: Option<&mut MonitorDeadline>,
     ) -> (Option<usize>, bool, bool) {
         // Only the issuer is certain to sample the chip before its next entry.
         let exclude = origin.map_or(0, |cpu| 1usize << cpu);
@@ -293,6 +294,17 @@ impl<I: VirtualIrqChip> VmDevices<I> {
             DeviceId::Rtc if access.width == 4 => io.rtc.access(offset, access.write),
             _ => None,
         };
+        if let Some(service) = service {
+            match device {
+                // RBR reads restart a sub-trigger FIFO timeout. Writes can
+                // reconfigure its IRQ/trigger or append bytes to virtual TX.
+                DeviceId::Uart if access.write.is_some() || offset == 0 => {
+                    service.observe_console(&io.console, true);
+                }
+                DeviceId::Rtc if access.write.is_some() => service.observe_rtc(&io.rtc),
+                _ => {}
+            }
+        }
         self.levels(&mut io, exclude);
         (value, console_tx, console_full)
     }
@@ -377,6 +389,28 @@ fn create_bus(layout: GuestBoardLayout, config: &VmConfig, ram: &GuestRam) -> Re
     bus.validate_ram(ram.guest_base(), ram.len())?;
     Ok(bus)
 }
+/// Absolute upper bound for a single extended management-hart grant.
+pub(crate) struct MonitorDeadline {
+    pub at: u64,
+    pub flush_at: u64,
+}
+impl MonitorDeadline {
+    pub fn observe_console(&mut self, console: &Console, running: bool) {
+        if console.is_full() {
+            self.at = 0;
+        } else if console.has_output() {
+            self.at = self.at.min(self.flush_at);
+        }
+        if running && let Some(at) = console.uart.rx_timeout_deadline() {
+            self.at = self.at.min(at);
+        }
+    }
+    pub fn observe_rtc(&mut self, rtc: &Rtc) {
+        if let Some(at) = rtc.irq_deadline() {
+            self.at = self.at.min(at);
+        }
+    }
+}
 pub(crate) struct DeviceIo<'a, I: VirtualIrqChip, R: Tracer> {
     pub devices: &'a VmDevices<I>,
     pub origin: u8,
@@ -385,13 +419,18 @@ pub(crate) struct DeviceIo<'a, I: VirtualIrqChip, R: Tracer> {
     pub trace: &'a mut R,
     pub console_tx: bool,
     pub console_full: bool,
+    pub service: Option<&'a mut MonitorDeadline>,
 }
 impl<I: VirtualIrqChip, R: Tracer> GuestIo for DeviceIo<'_, I, R> {
     fn mmio(&mut self, access: MmioAccess) -> Option<usize> {
         self.trace.on_mmio(access.gpa, access.write.is_some());
-        let (value, console_tx, console_full) =
-            self.devices
-                .access_io(Some(self.origin), access, self.now, self.link);
+        let (value, console_tx, console_full) = self.devices.access_io(
+            Some(self.origin),
+            access,
+            self.now,
+            self.link,
+            self.service.as_deref_mut(),
+        );
         self.console_tx |= console_tx;
         self.console_full |= console_full;
         value

@@ -56,11 +56,17 @@ pub(super) fn rebuild<A: HvArch, B: Board>(
     let layout = board.layout();
     // Recreate the original first. Extra firmware reservations, custom nodes or
     // boot policy must not silently disappear when we change the CPU/RAM shape.
-    let old_len = A::write_linux_dtb(source, layout, hz, args, out)?;
-    if out.get(..old_len) != Some(original) {
-        return Err(HvError::Unsupported);
-    }
-    let len = A::write_linux_dtb(child, layout, hz, args, out)?;
+    let baseline = A::write_linux_dtb(source, layout, hz, args, out)?;
+    let render = if out.get(..baseline) == Some(original) {
+        A::write_linux_dtb
+    } else {
+        let extended = A::write_extended_linux_dtb(source, layout, hz, args, out)?;
+        if out.get(..extended) != Some(original) {
+            return Err(HvError::Unsupported);
+        }
+        A::write_extended_linux_dtb
+    };
+    let len = render(child, layout, hz, args, out)?;
     resources.images.dtb = out.get(..len).ok_or(HvError::InvalidImage)?;
     child.dtb_size = len as u64;
     Ok(())

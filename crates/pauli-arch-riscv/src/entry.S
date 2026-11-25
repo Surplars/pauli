@@ -57,6 +57,8 @@
 .equ CTX_FP_ENABLED, {ctx_fp_enabled}
 .equ CTX_TLB_FLAGS, {ctx_tlb_flags}
 .equ CTX_GUEST_FILE, {ctx_guest_file}
+.equ CTX_VSTIMECMP, {ctx_vstimecmp}
+.equ CTX_SSTC_ENABLED, {ctx_sstc_enabled}
 .equ HOST_RA, {host_ra}
 .equ HOST_S0, {host_s0}
 .equ HOST_S1, {host_s1}
@@ -84,6 +86,7 @@
 .equ HOST_STVAL, {host_stval}
 .equ HOST_HTVAL, {host_htval}
 .equ HOST_HTINST, {host_htinst}
+.equ HOST_VSTIMECMP, {host_vstimecmp}
 .equ HOST_SENVCFG, {host_senvcfg}
 .equ HOST_SCOUNTEREN, {host_scounteren}
 .equ HOST_MODE, {host_mode}
@@ -121,13 +124,14 @@
 .equ PRIVILEGE_SHIFT, {privilege_shift}
 .equ PRIVILEGE_BIT, {privilege_bit}
 .equ SSTATUS_SPP, {sstatus_spp}
+.equ HOST_EXTERNAL_INTERRUPT, {host_external_interrupt}
 .equ HOST_INTERRUPTS, {host_interrupts}
 .equ RESIDENT_RESUME, {resident_resume}
 
-// SENVCFG has no VS bank: install the incoming value and save the outgoing
-// value on every switch, including a short exit from a resident vCPU.
-.macro swap_senvcfg incoming, outgoing
+// Exchange the incoming CSR value with its outgoing snapshot in one access.
+// The HS envelope is restored even when other VS state remains resident.
+.macro swap_csr csr, incoming, outgoing
     ld t1, \incoming
-    csrrw t1, senvcfg, t1
+    csrrw t1, \csr, t1
     sd t1, \outgoing
 .endm

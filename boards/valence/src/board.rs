@@ -55,7 +55,9 @@ pub struct Wave8 {
 }
 impl Board for Wave8 {
     const IRQ_DRIVEN_CONSOLE: bool = true;
-    const UNCONTENDED_QUANTUM_US: Option<u64> = Some(20_000);
+    const UNCONTENDED_QUANTUM_US: Option<u64> = Some(100_000);
+    const COLLECT_HS_STATS: bool = true;
+    const IDLE_USE_GUEST_DEADLINE: bool = true;
     fn info(&self) -> BoardInfo {
         self.info
     }
@@ -84,6 +86,7 @@ impl Board for Wave8 {
     fn service_devices(&self, _now: u64) {}
     fn shutdown(&self) -> ! {
         // Only an explicit host shutdown reaches here; guest SRST stops its VM.
+        let _ = flush_console();
         let _ = sbi::shutdown();
         halt()
     }
@@ -100,6 +103,9 @@ pub unsafe fn prepare(hart: usize, dtb: usize) -> Result<&'static Wave8> {
     }
     smp::install_topology(&[hart], None)?;
     pauli_arch_riscv::init_capabilities(true, true, true);
+    // SAFETY: validated single-hart OpenSBI board, before IRQ or dispatcher startup.
+    unsafe { pauli_arch_riscv::init_boot_sstc(1) };
+    pauli_core::trace::set_sstc_active(pauli_arch_riscv::sstc_available());
     // SAFETY: validated Wave8 DT and boot privilege; only the S-domain and S-file are used.
     unsafe { install_devices()? };
     unsafe extern "C" {
@@ -117,9 +123,11 @@ pub unsafe fn prepare(hart: usize, dtb: usize) -> Result<&'static Wave8> {
         boot_cpu: 0,
     };
     pauli_hal::hv_info!(
-        "Valence: HS hart 0, timebase {} Hz, {:?} guest\r",
+        "Valence: HS hart 0, timebase {} Hz, {:?} guest, sstc={}, stats={:#x}\r",
         TIMEBASE_HZ,
-        payload
+        payload,
+        pauli_arch_riscv::sstc_available(),
+        &raw const pauli_core::trace::PAULI_HS_STATS as usize
     );
     BOARD
         .set(Wave8 {
@@ -166,6 +174,9 @@ unsafe fn install_devices() -> Result<()> {
     // SAFETY: the installed HS vector owns external and native timer/SSIP traps.
     unsafe {
         host::irq::enable();
+    }
+    if let Some(uart) = SERIAL.get() {
+        uart.enable_async_tx();
     }
     Ok(())
 }
@@ -237,6 +248,9 @@ impl Console for BootConsole {
             None => Console::write(&sbi::FirmwareConsole, bytes),
         }
     }
+}
+pub fn flush_console() -> pauli_hal::device::Result<()> {
+    SERIAL.get().map_or(Ok(()), Uart::flush_tx)
 }
 pub fn halt() -> ! {
     loop {

@@ -53,6 +53,8 @@ pub struct VCpuContext {
     // Trusted transient binding, never restored from a guest CSR or image.
     // Assembly offsets are derived from this single layout, not duplicated literals.
     pub(crate) guest_file: u8,
+    pub vstimecmp: u64,
+    pub(crate) sstc_enabled: usize,
 }
 impl VCpuContext {
     pub const fn new() -> Self {
@@ -91,7 +93,23 @@ impl VCpuContext {
             aia: aia::GuestState::new(),
             virtual_aia: false,
             guest_file: 0,
+            vstimecmp: u64::MAX,
+            sstc_enabled: 0,
         }
+    }
+
+    /// A bound IMSIC drives the external level through hardware. Keep the
+    /// observed VS level for WFI in either delivery mode.
+    #[cfg(any(target_arch = "riscv64", test))]
+    pub(crate) fn set_external_pending(&mut self, asserted: bool) {
+        use crate::bits::{SEIP, VSEIP};
+        self.hvip = (self.hvip & !VSEIP)
+            | if asserted && self.guest_file == 0 {
+                VSEIP
+            } else {
+                0
+            };
+        self.vsip = (self.vsip & !SEIP) | if asserted { SEIP } else { 0 };
     }
 
     /// Opt in to guest-owned page fault handling. Default interception is kept
@@ -135,5 +153,42 @@ impl VCpuContext {
         }
         self.fp_enabled = 1;
         Ok(())
+    }
+
+    #[cfg(any(target_arch = "riscv64", test))]
+    pub(crate) fn wait_timer_deadline(&self, timer: &crate::timer::VirtualTimer) -> Option<u64> {
+        if self.vsie & crate::bits::STIP == 0 {
+            return None;
+        }
+        if self.sstc_enabled() {
+            (self.vstimecmp != u64::MAX).then_some(self.vstimecmp)
+        } else {
+            timer.deadline()
+        }
+    }
+
+    #[cfg(any(target_arch = "riscv64", test))]
+    pub(crate) fn refresh_timer(&self, timer: &mut crate::timer::VirtualTimer, now: u64) -> bool {
+        if self.sstc_enabled() {
+            // Guest time matches TIME because each load installs htimedelta=0.
+            // The hardware compares unsigned values even at the final tick.
+            now >= self.vstimecmp
+        } else {
+            timer.refresh(now);
+            timer.pending()
+        }
+    }
+
+    pub fn enable_sstc(&mut self) -> Result<(), crate::Error> {
+        if !crate::sstc_available() {
+            return Err(crate::Error::Unsupported);
+        }
+        self.sstc_enabled = 1;
+        self.vstimecmp = u64::MAX;
+        Ok(())
+    }
+
+    pub const fn sstc_enabled(&self) -> bool {
+        self.sstc_enabled != 0
     }
 }

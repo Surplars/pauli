@@ -7,6 +7,7 @@ use crate::{
     manager::VmStore,
     monitor::Monitor,
     runtime::{Dispatcher, VmRuntime},
+    trace::{StatsTracer, Tracer},
 };
 use pauli_hal::{hv_error, sync::Once};
 
@@ -45,7 +46,22 @@ pub fn boot<B: Board, A: HvArch>(board: &'static B, storage: &'static BootStorag
     }
     let mut monitor = Monitor::new();
     monitor.welcome(runtime);
-    let mut local = Dispatcher::new();
+    if B::COLLECT_HS_STATS {
+        run_boot_loop(
+            runtime,
+            &mut monitor,
+            Dispatcher::with_tracer(StatsTracer::global()),
+        );
+    } else {
+        run_boot_loop(runtime, &mut monitor, Dispatcher::new());
+    }
+}
+
+fn run_boot_loop<B: Board, A: HvArch, R: Tracer>(
+    runtime: &'static VmRuntime<A, B>,
+    monitor: &mut Monitor,
+    mut local: Dispatcher<A::Timer, R>,
+) -> ! {
     loop {
         monitor.poll(runtime);
         let result = match runtime.dispatch(&mut local) {

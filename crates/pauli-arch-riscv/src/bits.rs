@@ -25,3 +25,6 @@ pub const VMID_SHIFT: usize = 44;
 pub const VMID_BITS: usize = 14;
 pub const VMID_MASK: usize = (1 << VMID_BITS) - 1;
 pub const HGATP_SV39X4: usize = 8 << 60;
+pub const HENVCFG_STCE: usize = 1 << 63;
+pub const CSR_STIMECMP: u16 = 0x14d;
+pub const CSR_VSTIMECMP: u16 = 0x24d;

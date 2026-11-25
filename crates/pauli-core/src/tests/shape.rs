@@ -22,13 +22,23 @@ use std::{boxed::Box, format, vec, vec::Vec};
 
 const ARGS: &str = "console=ttyS0 rdinit=/init";
 pub(super) fn template(slot: usize, vm: &mut VmConfig) -> BootImages {
+    template_with_sstc(slot, vm, false)
+}
+fn template_with_sstc(slot: usize, vm: &mut VmConfig, sstc: bool) -> BootImages {
     vm.memory_size = if slot == 0 { 64 << 20 } else { 96 << 20 };
     vm.aia = slot == 1;
     vm.image.initrd_source = (16 << 20) + 8192;
     vm.image.initrd_size = 4;
     let mut out = vec![0; MAX_GUEST_DTB];
-    let n = pauli_config::guest_dtb::riscv(vm, GuestBoardLayout::DEFAULT, 1_000_000, ARGS, &mut out)
-        .unwrap();
+    let n = pauli_config::guest_dtb::riscv_with_sstc(
+        vm,
+        GuestBoardLayout::DEFAULT,
+        1_000_000,
+        ARGS,
+        sstc,
+        &mut out,
+    )
+    .unwrap();
     out.truncate(n);
     BootImages {
         kernel: &[0x31; 64],
@@ -115,7 +125,9 @@ fn check_tree(vm: &Vm<Arch>, count: usize, mib: usize, aia: bool) {
 
 #[test]
 fn grown_plic_and_shrunken_aia_children_restore_their_own_topologies() {
-    let fixture = Fixture::with_templates(1, [1, 4], 164, template);
+    let fixture = Fixture::with_templates(1, [1, 4], 164, |slot, vm| {
+        template_with_sstc(slot, vm, slot == 1)
+    });
     let rt = &fixture.runtime;
     let mut target = Target(rt);
     let grown = target
@@ -145,6 +157,15 @@ fn grown_plic_and_shrunken_aia_children_restore_their_own_topologies() {
     let peer = rt.manager.vm(3).unwrap();
     check_tree(&first, 8, 96, false);
     check_tree(&peer, 2, 64, true);
+    for (vm, sstc) in [(&first, false), (&peer, true)] {
+        let bytes = dtb(vm);
+        let tree = Fdt::new(&bytes).unwrap();
+        for cpu in 0..vm.config.vcpus {
+            let node = tree.find(&format!("/cpus/cpu@{cpu:x}")).unwrap().unwrap();
+            let isa = node.property("riscv,isa-extensions").unwrap().unwrap();
+            assert_eq!(isa.split(|&b| b == 0).any(|ext| ext == b"sstc"), sstc);
+        }
+    }
     check_tree(&rt.manager.vm(0).unwrap(), 1, 64, false);
     check_tree(&rt.manager.vm(1).unwrap(), 4, 96, true);
     target.start(grown.vm).unwrap();

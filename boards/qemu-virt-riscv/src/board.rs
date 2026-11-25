@@ -87,8 +87,11 @@ pub fn prepare(hart: usize, dtb: usize) -> Result<&'static QemuVirtBoard> {
     // SAFETY: boot runs before any other native owner; FDT resolved its unique logical index.
     unsafe {
         host::install_cpu_id(topology.boot);
+        host::trap::install_vector();
     }
     pauli_arch_riscv::init_capabilities(true, topology.fd, topology.aia);
+    // SAFETY: OpenSBI handed off the validated native topology with local IRQs masked.
+    unsafe { pauli_arch_riscv::init_boot_sstc(topology.count) };
     let (root, guest_ids) = irq::Root::discover(tree, &topology, ram)?;
     #[cfg(feature = "aia-guest-file")]
     // SAFETY: FDT established a supported S-file topology; guest file 1 is reserved.
@@ -120,10 +123,6 @@ pub fn prepare(hart: usize, dtb: usize) -> Result<&'static QemuVirtBoard> {
     let (devices, routes) = Devices::initialize(tree, ram, Some(&mut loader), &root)?;
     irq::ROUTER.set((root, routes)).map_err(|_| HvError::Busy)?;
     host::trap::set_handler(irq::event).map_err(|_| HvError::Busy)?;
-    // SAFETY: retained native stack and immutable route/stack ownership are published.
-    unsafe {
-        host::trap::install_vector();
-    }
     host::irq::enable_wake_sources(true);
     // SAFETY: native vector/IRQ controller and all routes are initialized.
     unsafe {

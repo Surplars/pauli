@@ -20,6 +20,18 @@ pub fn riscv(
     args: &str,
     out: &mut [u8],
 ) -> Result<usize> {
+    riscv_with_sstc(vm, layout, hz, args, false, out)
+}
+
+/// Write the canonical tree, optionally advertising RISC-V `sstc` for Linux VMs.
+pub fn riscv_with_sstc(
+    vm: &VmConfig,
+    layout: GuestBoardLayout,
+    hz: u32,
+    args: &str,
+    sstc: bool,
+    out: &mut [u8],
+) -> Result<usize> {
     vm.validate_guest_geometry()?;
     if !layout.admits_ram(vm.guest_base, vm.memory_size) {
         return Err(Error::Memory);
@@ -59,7 +71,7 @@ pub fn riscv(
         size: vm.memory_size,
     })?;
     f.end()?;
-    cpus(&mut f, vm, hz)?;
+    cpus(&mut f, vm, hz, sstc)?;
     interrupts(&mut f, vm, layout)?;
     device(
         &mut f,
@@ -90,7 +102,7 @@ pub fn riscv(
     f.end()?;
     f.finish()
 }
-fn cpus(f: &mut Writer<'_>, vm: &VmConfig, hz: u32) -> Result {
+fn cpus(f: &mut Writer<'_>, vm: &VmConfig, hz: u32, sstc: bool) -> Result {
     f.begin(&[b"cpus"])?;
     f.u32("#address-cells", 1)?;
     f.u32("#size-cells", 0)?;
@@ -104,20 +116,30 @@ fn cpus(f: &mut Writer<'_>, vm: &VmConfig, hz: u32) -> Result {
         f.u32("reg", cpu)?;
         f.text("mmu-type", "riscv,sv39")?;
         f.text("riscv,isa-base", "rv64i")?;
-        let extra: &[u8] = if vm.aia { b"ssaia\0" } else { &[] };
         let integer = vm.firmware.is_some();
+        let has_sstc = !integer && sstc;
+        let extra_aia: &[u8] = if vm.aia { b"ssaia\0" } else { &[] };
+        let extra_sstc: &[u8] = if has_sstc { b"sstc\0" } else { &[] };
         let fp: &[u8] = if integer { b"" } else { b"f\0d\0" };
         f.prop(
             "riscv,isa-extensions",
-            &[b"i\0m\0a\0", fp, b"c\0zicsr\0zifencei\0zicntr\0", extra],
+            &[
+                b"i\0m\0a\0",
+                fp,
+                b"c\0zicsr\0zifencei\0zicntr\0",
+                extra_aia,
+                extra_sstc,
+            ],
         )?;
         f.text(
             "riscv,isa",
-            match (integer, vm.aia) {
-                (true, false) => "rv64imac_zicsr_zifencei_zicntr",
-                (true, true) => "rv64imac_zicsr_zifencei_zicntr_ssaia",
-                (false, false) => "rv64imafdc_zicsr_zifencei_zicntr",
-                (false, true) => "rv64imafdc_zicsr_zifencei_zicntr_ssaia",
+            match (integer, vm.aia, has_sstc) {
+                (true, false, _) => "rv64imac_zicsr_zifencei_zicntr",
+                (true, true, _) => "rv64imac_zicsr_zifencei_zicntr_ssaia",
+                (false, false, false) => "rv64imafdc_zicsr_zifencei_zicntr",
+                (false, true, false) => "rv64imafdc_zicsr_zifencei_zicntr_ssaia",
+                (false, false, true) => "rv64imafdc_zicsr_zifencei_zicntr_sstc",
+                (false, true, true) => "rv64imafdc_zicsr_zifencei_zicntr_ssaia_sstc",
             },
         )?;
         f.begin(&[b"interrupt-controller"])?;

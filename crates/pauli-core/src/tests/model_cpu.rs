@@ -40,6 +40,8 @@ pub struct Cpu {
     pub deadline: Option<u64>,
     /// Return to the native dispatcher on the next entry, even before its deadline.
     pub native_event: bool,
+    /// A compute-only entry runs until its programmed HS deadline unless MMIO is scripted.
+    pub run_until_host_timer: bool,
     /// Scripted guest writes its next compare immediately before each WFI.
     pub wfi_timer_interval: Option<u64>,
     /// Fixed-phase guest: advance the last compare, not the time it was serviced.
@@ -112,6 +114,7 @@ impl ArchVcpu for Cpu {
             external: false,
             deadline: None,
             native_event: false,
+            run_until_host_timer: false,
             wfi_timer_interval: None,
             wfi_timer_period: 0,
         })
@@ -123,12 +126,32 @@ impl ArchVcpu for Cpu {
         Ok(())
     }
     unsafe fn run(&mut self, opts: RunOptions<'_, Self>) -> Result<VcpuExit> {
+        unsafe { self.run_with_trace(opts, None) }
+    }
+    unsafe fn run_with_trace(
+        &mut self,
+        opts: RunOptions<'_, Self>,
+        mut sample: Option<&mut GuestSample>,
+    ) -> Result<VcpuExit> {
         assert!(opts.resident.file);
         opts.resident.base = true;
         self.retired = false;
         self.steps += 1;
-        NOW.with(|now| now.set(now.get() + 100));
-        if let Some(access) = self.mmio.take() {
+        TickInterval::measure(
+            sample.as_deref_mut().map(|s| &mut s.interval),
+            Timer::now,
+            || {
+                NOW.with(|now| {
+                    now.set(if self.run_until_host_timer && self.mmio.is_none() {
+                        opts.deadline
+                    } else {
+                        now.get() + 100
+                    })
+                });
+            },
+        );
+        let mmio = self.mmio.take();
+        if let Some(access) = mmio {
             assert!(opts.io.mmio(access).is_some());
         }
         let kind = self.script.pop_front().unwrap_or(ExitKind::Resume);
@@ -138,6 +161,15 @@ impl ArchVcpu for Cpu {
             } else if let Some(interval) = self.wfi_timer_interval {
                 self.deadline = Some(Timer::now() + interval);
             }
+        }
+        if let Some(sample) = sample {
+            sample.source = if kind == ExitKind::Wait {
+                ExitSource::Wfi
+            } else if mmio.is_some() {
+                ExitSource::Mmio
+            } else {
+                ExitSource::Other
+            };
         }
         Ok(VcpuExit {
             kind,

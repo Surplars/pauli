@@ -3,6 +3,33 @@ use crate::{aia::virtualized::VirtualAia, irq_backend::RiscvIrqChip, plic::Virtu
 use pauli_core::arch::{IrqRegion::Legacy, VirtualIrqChip};
 
 #[test]
+fn external_line_updates_preserve_timer_and_software_levels() {
+    use crate::{VCpuContext, bits};
+
+    let mut ctx = VCpuContext::new();
+    ctx.hvip = bits::VSSIP | bits::VSTIP;
+    ctx.vsip = bits::SSIP | bits::STIP;
+    for (file, line, injected) in [
+        (0, true, true),
+        (1, true, false),
+        (1, false, false),
+        (0, true, true),
+        (0, false, false),
+    ] {
+        ctx.guest_file = file;
+        ctx.set_external_pending(line);
+        assert_eq!(
+            ctx.hvip,
+            bits::VSSIP | bits::VSTIP | if injected { bits::VSEIP } else { 0 }
+        );
+        assert_eq!(
+            ctx.vsip,
+            bits::SSIP | bits::STIP | if line { bits::SEIP } else { 0 }
+        );
+    }
+}
+
+#[test]
 fn one_shared_plic_claim_lowers_both_context_lines() {
     let mut chip = RiscvIrqChip::Legacy(VirtualPlic::with_contexts(2));
     for (offset, value) in [(40, 1), (0x2000, 1 << 10), (0x2080, 1 << 10)] {

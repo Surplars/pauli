@@ -51,8 +51,6 @@ pauli_guest_enter:
     sd t1, HOST_HTVAL(sp)
     csrr t1, htinst
     sd t1, HOST_HTINST(sp)
-    csrr t1, scounteren
-    sd t1, HOST_SCOUNTEREN(sp)
     sd sp, CTX_HOST_SP(a0)
     // Save even when host FS is Off: dormant host bits must neither leak into
     // the guest nor be overwritten. FS and VS are independent HS access gates.
@@ -67,9 +65,8 @@ pauli_guest_enter:
     fp_save sp, HOST_FP
     fp_restore a0, CTX_FP
 .Lfp_enter_done:
-    swap_senvcfg CTX_SENVCFG(a0), HOST_SENVCFG(sp)
-    ld t1, CTX_SCOUNTEREN(a0)
-    csrw scounteren, t1
+    swap_csr senvcfg, CTX_SENVCFG(a0), HOST_SENVCFG(sp)
+    swap_csr scounteren, CTX_SCOUNTEREN(a0), HOST_SCOUNTEREN(sp)
     // A short exit does not relinquish the VS bank. Software changed only
     // GPR/PC or pending levels; the remaining snapshot is observational.
     li t2, RESIDENT_RESUME
@@ -94,8 +91,16 @@ pauli_guest_enter:
     // Prevent speculative VS translations from crossing an HGATP/VMID or
     // HENVCFG change. Host VSATP was saved before this point.
     csrw vsatp, zero
-    // Keep Sstc disabled: no direct vstimecmp path bypasses SBI emulation.
+    // Enable Sstc (vstimecmp) only for explicitly provisioned vCPUs on discovered hardware.
+    ld t1, CTX_SSTC_ENABLED(a0)
+    beqz t1, .Lhenvcfg_zero
+    li t1, 1
+    slli t1, t1, 63
+    csrw henvcfg, t1
+    j .Lhenvcfg_done
+.Lhenvcfg_zero:
     csrw henvcfg, zero
+.Lhenvcfg_done:
     csrw htimedelta, zero
     ld t1, CTX_HGATP(a0)
     csrw hgatp, t1
@@ -146,6 +151,10 @@ pauli_guest_enter:
     csrw hvip, t1
     ld t1, CTX_VSIP(a0)
     csrw vsip, t1
+    ld t1, CTX_SSTC_ENABLED(a0)
+    beqz t1, .Lsstc_enter_done
+    swap_csr {csr_vstimecmp}, CTX_VSTIMECMP(a0), HOST_VSTIMECMP(sp)
+.Lsstc_enter_done:
     ld t1, CTX_PC(a0)
     csrw sepc, t1
     // SPV enters virtualization. Restore VS/VU from trusted exit state; HS
@@ -170,9 +179,11 @@ pauli_guest_enter:
     slli t2, t2, PRIVILEGE_SHIFT
     or t1, t1, t2
     csrw hstatus, t1
-    // Physical timer and host software kicks return to HS. Guest software
-    // interrupts use delegated VSSIP instead; never confuse the two levels.
-    li t1, HOST_INTERRUPTS
+    // Timer and kicks always preempt. Only an owner that enabled native
+    // external IRQs may be interrupted by a board device during a guest slice.
+    ld t1, HOST_SIE(sp)
+    andi t1, t1, HOST_EXTERNAL_INTERRUPT
+    ori t1, t1, HOST_INTERRUPTS
     csrw sie, t1
     csrr t1, sstatus
     li t2, ~SSTATUS_SPP

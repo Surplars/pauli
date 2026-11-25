@@ -133,7 +133,7 @@ impl VirtualCpu {
     pub fn set_external_line(&mut self, asserted: bool) {
         self.ctx.hideleg |= bits::VSEIP;
         self.external_pending = asserted || (self.ctx.guest_file != 0 && self.external_pending);
-        self.refresh(crate::host::timer::read_time());
+        self.ctx.set_external_pending(self.external_pending);
     }
     pub fn inject_software_interrupt(&mut self) {
         self.ctx.hideleg |= bits::VSSIP;
@@ -142,16 +142,13 @@ impl VirtualCpu {
     }
     pub fn clear_pending(&mut self) {
         self.timer = VirtualTimer::new();
+        self.ctx.vstimecmp = u64::MAX;
         self.external_pending = false;
         self.ctx.hvip = 0;
         self.ctx.vsip &= !(bits::SSIP | bits::STIP | bits::SEIP);
     }
     pub fn wait_deadline(&self) -> Option<u64> {
-        if self.ctx.vsie & bits::STIP != 0 {
-            self.timer.deadline()
-        } else {
-            None
-        }
+        self.ctx.wait_timer_deadline(&self.timer)
     }
     pub fn poll_wakeup(&mut self) -> bool {
         self.refresh(crate::host::timer::read_time());
@@ -185,6 +182,7 @@ impl VirtualCpu {
         }
         ctx.fp_enabled = self.ctx.fp_enabled;
         ctx.virtual_aia = self.ctx.virtual_aia;
+        ctx.sstc_enabled = self.ctx.sstc_enabled;
         if self.smp {
             ctx.hideleg |= bits::VSSIP;
         }
@@ -201,21 +199,21 @@ impl VirtualCpu {
         debug_assert!(self.ctx.virtual_aia);
         self.ctx.guest_file = file;
         self.external_pending = external;
-        self.refresh(crate::host::timer::read_time());
+        self.ctx.set_external_pending(external);
     }
     fn refresh(&mut self, now: u64) {
-        self.timer.refresh(now);
+        let timer_pending = self.ctx.refresh_timer(&mut self.timer, now);
         let software = self.ctx.hvip & bits::VSSIP;
-        let external = if self.external_pending && self.ctx.guest_file == 0 {
-            bits::VSEIP
-        } else {
-            0
-        };
-        self.ctx.hvip = software | if self.timer.pending() { bits::VSTIP } else { 0 } | external;
-        self.ctx.vsip = (self.ctx.vsip & !(bits::SSIP | bits::STIP | bits::SEIP))
+        self.ctx.hvip = software
+            | if self.ctx.sstc_enabled == 0 && timer_pending {
+                bits::VSTIP
+            } else {
+                0
+            };
+        self.ctx.vsip = (self.ctx.vsip & !(bits::SSIP | bits::STIP))
             | if software != 0 { bits::SSIP } else { 0 }
-            | if self.timer.pending() { bits::STIP } else { 0 }
-            | if self.external_pending { bits::SEIP } else { 0 };
+            | if timer_pending { bits::STIP } else { 0 };
+        self.ctx.set_external_pending(self.external_pending);
     }
     fn enabled_pending(&self) -> bool {
         self.ctx.vsie & self.ctx.vsip & (bits::SSIP | bits::STIP | bits::SEIP) != 0
@@ -225,17 +223,28 @@ impl VirtualCpu {
     /// and a sole-owned physical timer. Resident/file state is put before any
     /// foreign control/fence/migration. Retire all visited CPUs before RAM reuse.
     pub unsafe fn run(&mut self, options: RunOptions<'_>) -> Result<ManagedExit, Error> {
+        // SAFETY: forward the same exclusive switch contract.
+        unsafe { self.run_with_interval(options, None) }
+    }
+    pub(crate) unsafe fn run_with_interval(
+        &mut self,
+        options: RunOptions<'_>,
+        interval: Option<&mut pauli_core::arch::TickInterval>,
+    ) -> Result<ManagedExit, Error> {
         if options.host_deadline == u64::MAX {
             return Err(Error::InvalidDeadline);
         }
-        self.refresh(crate::host::timer::read_time());
+        let physical_deadline = if self.ctx.sstc_enabled() {
+            // Hardware evaluates vstimecmp at entry. IPI and external setters
+            // already publish their own levels, and VSTIP injection stays clear.
+            options.host_deadline
+        } else {
+            self.refresh(crate::host::timer::read_time());
+            self.timer.physical_deadline(options.host_deadline)
+        };
         // SAFETY: caller owns this CPU's compare endpoint through the complete interval.
-        unsafe {
-            options
-                .physical
-                .program(self.timer.physical_deadline(options.host_deadline))
-        }
-        .map_err(|_| Error::TimerUnavailable)?;
+        unsafe { options.physical.program(physical_deadline) }
+            .map_err(|_| Error::TimerUnavailable)?;
         let warm = options.resident.as_ref().is_some_and(|bank| bank.loaded());
         let residents =
             crate::vmid::entering_hart(self.resident_harts, crate::host::cpu_id(), || {
@@ -245,8 +254,8 @@ impl VirtualCpu {
         // SAFETY: exclusive context and immutable assigned backing; timer is armed.
         let raw = unsafe {
             match options.resident {
-                Some(bank) => bank.run(&mut self.ctx),
-                None => crate::entry::guest_run(&mut self.ctx),
+                Some(bank) => bank.run(&mut self.ctx, interval),
+                None => crate::entry::guest_run_with_interval(&mut self.ctx, interval),
             }
         }?;
         self.resident_harts = residents;
@@ -333,7 +342,11 @@ impl VirtualCpu {
         match sbi::handle_ecall_mode(&mut self.ctx, raw, self.smp) {
             Ok(action @ (SbiAction::Resume | SbiAction::SetTimer { .. })) => {
                 if let SbiAction::SetTimer { deadline } = action {
-                    self.timer.set_deadline(deadline, now);
+                    if self.ctx.sstc_enabled != 0 {
+                        self.ctx.vstimecmp = deadline;
+                    } else {
+                        self.timer.set_deadline(deadline, now);
+                    }
                     self.refresh(now);
                 }
                 (Disposition::Resume, Some(action), false, false)

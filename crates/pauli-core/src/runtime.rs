@@ -30,6 +30,9 @@ pub struct VmRuntime<A: HvArch, B: Board> {
     pub board: &'static B,
     pub manager: VmManager<A>,
     firmware_only: bool,
+    diskless_single_hart: bool,
+    // Written and consumed only on the single management hart.
+    service_due: AtomicBool,
     ready: AtomicBool,
     #[cfg(feature = "selftest")]
     idle_wakes: idle_observation::IdleCounters,
@@ -73,10 +76,18 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 .iter()
                 .flatten()
                 .all(|vm| vm.firmware.is_some());
+        let diskless_single_hart = board.info().host_cpus == 1
+            && B::IRQ_DRIVEN_CONSOLE
+            && manager.config.disks.iter().all(Option::is_none)
+            && manager.config.vms.iter().flatten().all(|vm| {
+                vm.firmware.is_none() && !vm.net_uplink && vm.net_peer.is_none() && vm.vcpus == 1
+            });
         Ok(Self {
             board,
             manager,
             firmware_only,
+            diskless_single_hart,
+            service_due: AtomicBool::new(false),
             ready: AtomicBool::new(false),
             #[cfg(feature = "selftest")]
             idle_wakes: Default::default(),

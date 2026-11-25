@@ -67,6 +67,10 @@
     sd t1, CTX_VSIE(t0)
     csrr t1, vsip
     sd t1, CTX_VSIP(t0)
+    ld t2, CTX_SSTC_ENABLED(t0)
+    beqz t2, .Lsstc_exit_done
+    swap_csr {csr_vstimecmp}, HOST_VSTIMECMP(sp), CTX_VSTIMECMP(t0)
+.Lsstc_exit_done:
     csrr t1, scause
     sd t1, CTX_EXIT_CAUSE(t0)
     csrr t1, stval
@@ -80,14 +84,11 @@
     srli t1, t1, PRIVILEGE_SHIFT
     andi t1, t1, PRIVILEGE_BIT
     sd t1, CTX_RESUME_VS(t0)
-    csrr t1, scounteren
-    sd t1, CTX_SCOUNTEREN(t0)
     csrr t1, hvip
     andi t1, t1, VIRTUAL_PENDING
     sd t1, CTX_HVIP(t0)
-    swap_senvcfg HOST_SENVCFG(sp), CTX_SENVCFG(t0)
-    ld t1, HOST_SCOUNTEREN(sp)
-    csrw scounteren, t1
+    swap_csr senvcfg, HOST_SENVCFG(sp), CTX_SENVCFG(t0)
+    swap_csr scounteren, HOST_SCOUNTEREN(sp), CTX_SCOUNTEREN(t0)
     ld t1, HOST_MODE(sp)
     bnez t1, .Lhost_bank_restored
     addi t3, sp, HOST_BANK

@@ -67,7 +67,13 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
 
     /// # Safety
     /// The dispatcher owns this hart, with IRQs masked, banks put and wake sources armed.
-    pub(super) unsafe fn observe_idle(&self, owner: usize, disarmed: bool, guest: Option<u64>) {
+    pub(super) unsafe fn observe_idle(
+        &self,
+        owner: usize,
+        disarmed: bool,
+        guest: Option<u64>,
+        interval: Option<&mut arch::TickInterval>,
+    ) {
         let sample = A::Smp::SAMPLE_IDLE;
         let bracket = (disarmed && self.firmware_only && sample.is_some()).then(|| {
             let counter = &self.idle_wakes.workers[owner];
@@ -76,7 +82,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             (counter, base)
         });
         // SAFETY: the caller established the ordinary dispatcher's WFI preconditions.
-        unsafe { A::Smp::idle() };
+        arch::TickInterval::measure(interval, A::Timer::now, || unsafe { A::Smp::idle() });
         if let Some(sample) = sample {
             if let Some((counter, base)) = bracket {
                 let software = sample() == arch::IdleWake::Software;

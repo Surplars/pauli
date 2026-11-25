@@ -115,8 +115,65 @@ fn scenarios(
     if step(&mut cpu, space, timer, ticks)?.cause != VmExit::GUEST_STORE_PAGE_FAULT {
         return Err(Error::InvalidState);
     }
+    if crate::sstc_available() {
+        sstc_switches(space, base, timer, ticks)?;
+        pauli_hal::hv_info!("HV selftest PASS: Sstc FULL/LOAD/RESUME compare restoration");
+    }
     Ok(())
 }
+
+fn sstc_switches(
+    space: &GStagePageTable,
+    base: usize,
+    timer: &mut PhysicalTimer,
+    ticks: u64,
+) -> Result<(), Error> {
+    let mut ctx = VCpuContext::new();
+    ctx.enable_sstc()?;
+    // SAFETY: enable_sstc succeeded on this IRQ-masked owner. The full host
+    // comparator must survive even if host henvcfg.STCE initially was clear.
+    let host_compare = || unsafe {
+        let value: u64;
+        core::arch::asm!("csrr {}, {csr}", out(reg) value, csr = const crate::bits::CSR_VSTIMECMP, options(nostack));
+        value
+    };
+    let host = host_compare();
+    let values = [host ^ 1, host ^ 2, host ^ 3];
+    ctx.pc = base + 0x1d0;
+    ctx.x[12..15].copy_from_slice(&values.map(|value| value as usize));
+    ctx.x[17] = crate::sbi::BASE;
+    let mut cpu = VirtualCpu::new(u32::MAX - 3, 0, 1, ctx, space)?;
+    let mut bank = crate::resident::Resident::default();
+    let result = (|| {
+        let mut previous = u64::MAX;
+        for (i, reg) in [8, 9, 18].into_iter().enumerate() {
+            // SAFETY: probe owns this pinned hart, compare and immutable RX page.
+            // Execute FULL, resident LOAD and resident RESUME in that order.
+            let exit = unsafe {
+                cpu.run(RunOptions {
+                    space,
+                    host_deadline: read_time() + ticks,
+                    io: &mut NoDevices,
+                    physical: timer,
+                    resident: (i != 0).then_some(&mut bank),
+                })
+            }?;
+            if exit.raw.cause != VmExit::VS_ECALL
+                || cpu.context().x[reg] as u64 != previous
+                || cpu.context().vstimecmp != values[i]
+                || host_compare() != host
+            {
+                return Err(Error::HostTransition);
+            }
+            previous = values[i];
+        }
+        Ok(())
+    })();
+    bank.put(cpu.context_mut());
+    cpu.retire_local_translations();
+    result
+}
+
 fn step(
     cpu: &mut VirtualCpu,
     space: &GStagePageTable,

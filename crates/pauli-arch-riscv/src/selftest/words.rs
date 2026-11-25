@@ -30,6 +30,19 @@ pub const WORDS: &[(usize, &[u32])] = &[
     ),
     // rdcycle a0; ecall: TIME access must not grant other counters.
     (0x1c0, &[0xc000_2573, 0x0000_0073]),
+    // Three guest stimecmp exchanges, one per entry mode. Each following
+    // BASE ecall reports the old comparator in s0, s1 or s2.
+    (
+        0x1d0,
+        &[
+            0x14d6_1473,
+            0x0000_0073, // csrrw s0,stimecmp,a2; ecall
+            0x14d6_94f3,
+            0x0000_0073, // csrrw s1,stimecmp,a3; ecall
+            0x14d7_1973,
+            0x0000_0073, // csrrw s2,stimecmp,a4; ecall
+        ],
+    ),
     // Masked TIME replacement: initial request, future time from a2,
     // observe sip in s0, disarm, observe sip in s1, BASE report.
     (

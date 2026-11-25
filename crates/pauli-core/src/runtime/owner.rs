@@ -2,7 +2,7 @@
 //! Ownership/Lock Ordering: admission bit -> context take -> IRQ bank, then no locks.
 //! Invariants: cleanup restores both banks on every Result path before returning CPU.
 use super::*;
-use crate::vm::devices::DeviceIo;
+use crate::vm::devices::{DeviceIo, MonitorDeadline};
 use deadline::Visit;
 struct Owned<V: ArchVcpu> {
     cpu: V,
@@ -229,9 +229,34 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
     ) -> Result<bool> {
         let mut entered = false;
         let mut wrote_console = false;
-        while vm.lifecycle.can_enter() && A::Timer::now() < deadline {
+        let info = self.board.info();
+        let boot_slice = uncontended && slot.owner == info.boot_cpu;
+        // Only the single-hart opt-in has a single writer of these clocks and
+        // queues throughout the grant. A native UART interrupt returns to HS.
+        let track_service = B::IDLE_USE_GUEST_DEADLINE && boot_slice && info.host_cpus == 1;
+        let mut service = MonitorDeadline {
+            at: deadline,
+            flush_at: flush_deadline,
+        };
+        if track_service {
+            for guest in self.manager.vms() {
+                let running = guest.lifecycle.can_enter();
+                let io = guest.devices.io.lock();
+                service.observe_console(&io.console, running);
+                if running {
+                    service.observe_rtc(&io.rtc);
+                }
+            }
+        }
+        while vm.lifecycle.can_enter() {
+            let entry_deadline = service.at;
+            if A::Timer::now() >= entry_deadline {
+                if !entered && track_service && entry_deadline < deadline {
+                    self.service_due.store(true, Ordering::Relaxed);
+                }
+                break;
+            }
             slot.entered();
-            entered = true;
             {
                 // Sample the line and consume its file inbox under the same lock.
                 // A producer arriving afterwards belongs to a later observation.
@@ -243,12 +268,11 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 ));
                 bank.load_interrupts(&mut owned.cpu, &mut chip)?;
             }
+            if !entered {
+                local.tracer.on_slice_start(slot.index);
+            }
             local.tracer.on_vm_enter(slot.index);
-            let began = if R::MEASURE_ELAPSED {
-                A::Timer::now()
-            } else {
-                0
-            };
+            let mut sample = arch::GuestSample::default();
             let mut io = DeviceIo {
                 devices: &vm.devices,
                 origin: slot.index,
@@ -257,21 +281,29 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 trace: &mut local.tracer,
                 console_tx: false,
                 console_full: false,
+                service: track_service.then_some(&mut service),
             };
             // SAFETY: exclusive owned CPU, immutable retained space, scoped bank,
             // sole native timer and one absolute deadline; all locks released.
             let exit = unsafe {
-                owned.cpu.run(arch::RunOptions {
-                    space: &vm.space,
-                    deadline,
-                    io: &mut io,
-                    timer: &mut local.timer,
-                    resident: bank,
-                })
+                owned.cpu.run_with_trace(
+                    arch::RunOptions {
+                        space: &vm.space,
+                        deadline: entry_deadline,
+                        io: &mut io,
+                        timer: &mut local.timer,
+                        resident: bank,
+                    },
+                    R::MEASURE_ELAPSED.then_some(&mut sample),
+                )
             }?;
+            entered = true;
             let (console_tx, console_full) = (io.console_tx, io.console_full);
             let elapsed = if R::MEASURE_ELAPSED {
-                A::Timer::now().wrapping_sub(began)
+                local
+                    .tracer
+                    .on_guest_interval(slot.index, sample.source, sample.interval);
+                sample.interval.elapsed()
             } else {
                 0
             };
@@ -296,9 +328,8 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 }
             }
             wrote_console |= console_tx;
-            let console_flush = uncontended
-                && slot.owner == self.board.info().boot_cpu
-                && (self.board.console_rx_queued()
+            let console_flush = boot_slice
+                && (self.console_input_ready()
                     || (wrote_console && (console_full || A::Timer::now() >= flush_deadline)));
             if owned.state != CpuState::Runnable
                 || exit.native_event

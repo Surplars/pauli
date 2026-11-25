@@ -146,6 +146,14 @@ impl Uart16550 {
             && self.len < self.trigger()
             && self.now.saturating_sub(self.last_rx) < self.timeout
     }
+    /// First native tick at which an unread, sub-trigger FIFO can raise its RX IRQ.
+    pub fn rx_timeout_deadline(&self) -> Option<u64> {
+        if self.rx_timeout_armed() {
+            self.last_rx.checked_add(self.timeout)
+        } else {
+            None
+        }
+    }
     fn modem(&self) -> u8 {
         if self.mcr & MCR_LOOP == 0 {
             MSR_CTS | MSR_DSR | MSR_DCD

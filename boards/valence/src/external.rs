@@ -86,9 +86,15 @@ fn service(code: PhysRange, host: u64) -> Result<VmConfig> {
 }
 
 fn render(vm: &mut VmConfig, args: &str, out: &mut [u8]) -> Result<()> {
-    vm.dtb_size =
-        pauli_config::guest_dtb::riscv(vm, GuestBoardLayout::DEFAULT, TIMEBASE_HZ as u32, args, out)
-            .map_err(|_| HvError::InvalidImage)? as u64;
+    vm.dtb_size = pauli_config::guest_dtb::riscv_with_sstc(
+        vm,
+        GuestBoardLayout::DEFAULT,
+        TIMEBASE_HZ as u32,
+        args,
+        pauli_arch_riscv::sstc_available(),
+        out,
+    )
+    .map_err(|_| HvError::InvalidImage)? as u64;
     Ok(())
 }
 

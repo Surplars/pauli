@@ -50,7 +50,8 @@ extern "C" fn pauli_native_trap(frame: &mut TrapFrame) {
             Event::Timer
         }
         value if value == interrupt | 9 => Event::External,
-        // A guest never reaches this vector. A synchronous HS exception is an
+        2 if super::timer::recover_boot_compare(&mut frame.pc) => return,
+        // A guest never reaches this vector. Any other synchronous HS exception is an
         // unrecoverable host programming fault, not a guest fault to resume.
         _ => panic!(
             "native HS trap: cause={:#x} pc={:#x} value={:#x}",

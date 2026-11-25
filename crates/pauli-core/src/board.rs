@@ -43,6 +43,10 @@ pub trait Board: Send + Sync + 'static {
     /// Optional extended slice (microseconds) when a single Ready vCPU is the
     /// sole active lane on its physical hart. Defaults to None (exact vm.quantum).
     const UNCONTENDED_QUANTUM_US: Option<u64> = None;
+    /// Collect zero-UART-interference HS exit and timing counters in `PAULI_HS_STATS`.
+    const COLLECT_HS_STATS: bool = false;
+    /// Use parked vCPU/RTC deadlines during native idle for diskless single-hart Linux VMs.
+    const IDLE_USE_GUEST_DEADLINE: bool = false;
 
     fn info(&self) -> BoardInfo;
     fn layout(&self) -> GuestBoardLayout {

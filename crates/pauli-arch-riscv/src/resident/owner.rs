@@ -53,7 +53,11 @@ impl Resident {
     /// in memory. A context reset, foreign control/fence service, migration or
     /// native scheduling requires put FIRST. The same vCPU exclusively owns
     /// the bank until then; neither callback code nor firmware may replace it.
-    pub(crate) unsafe fn run(&mut self, ctx: &mut VCpuContext) -> Result<VmExit, crate::Error> {
+    pub(crate) unsafe fn run(
+        &mut self,
+        ctx: &mut VCpuContext,
+        interval: Option<&mut pauli_core::arch::TickInterval>,
+    ) -> Result<VmExit, crate::Error> {
         // SAFETY: same IRQ-masked physical owner; fail before taking an optional bank.
         unsafe { crate::vmid::prepare(ctx) }?;
         let external = ctx.virtual_aia && ctx.hvip & (1 << 10) != 0;
@@ -76,7 +80,7 @@ impl Resident {
         self.plan = ctx.tlb_flags;
         let mode = self.state.enter();
         // SAFETY: this IRQ-masked owner retains the matching context and saved base/optional banks until put.
-        let exit = unsafe { entry::enter(ctx, mode) };
+        let exit = unsafe { entry::enter(ctx, mode, interval) };
         if self.aia.is_some() {
             // SAFETY: this IRQ-masked owner retains the matching context and saved base/optional banks until put.
             unsafe { crate::aia::capture(ctx) };

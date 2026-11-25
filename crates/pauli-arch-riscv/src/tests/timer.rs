@@ -192,3 +192,47 @@ fn exhaustive() {
         "HV physical timer PASS: {sequences} sequences, absolute budget, expired STIP, guest/idle isolation, failure and ownership handoff"
     );
 }
+
+#[test]
+fn sstc_and_firmware_waiters_follow_their_own_compare() {
+    use crate::{VCpuContext, bits};
+
+    let mut ctx = VCpuContext::new();
+    let mut timer = VirtualTimer::new();
+    timer.set_deadline(9, 0);
+    ctx.vsie = bits::STIP;
+    assert_eq!(ctx.wait_timer_deadline(&timer), Some(9));
+    assert!(ctx.refresh_timer(&mut timer, 9));
+    ctx.sstc_enabled = 1;
+    assert_eq!(ctx.wait_timer_deadline(&timer), None);
+    assert!(!ctx.refresh_timer(&mut timer, 9));
+    ctx.vstimecmp = 19;
+    assert_eq!(ctx.wait_timer_deadline(&timer), Some(19));
+    assert!(!ctx.refresh_timer(&mut timer, 18));
+    assert!(ctx.refresh_timer(&mut timer, 19));
+    ctx.vsie = 0;
+    assert_eq!(ctx.wait_timer_deadline(&timer), None);
+    ctx.vstimecmp = u64::MAX;
+    assert!(!ctx.refresh_timer(&mut timer, u64::MAX - 1));
+    assert!(ctx.refresh_timer(&mut timer, u64::MAX));
+}
+
+#[test]
+fn sstc_context_capability_gating_and_initial_deadline() {
+    use crate::{Error, VCpuContext, init_sstc, sstc_available};
+
+    init_sstc(false);
+    assert!(!sstc_available());
+    let mut ctx = VCpuContext::new();
+    assert!(!ctx.sstc_enabled());
+    assert_eq!(ctx.vstimecmp, u64::MAX);
+    assert_eq!(ctx.enable_sstc(), Err(Error::Unsupported));
+    assert!(!ctx.sstc_enabled());
+
+    init_sstc(true);
+    assert!(sstc_available());
+    assert_eq!(ctx.enable_sstc(), Ok(()));
+    assert!(ctx.sstc_enabled());
+    assert_eq!(ctx.vstimecmp, u64::MAX);
+    init_sstc(false);
+}

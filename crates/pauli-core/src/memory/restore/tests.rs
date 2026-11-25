@@ -109,7 +109,9 @@ fn aligned_and_unaligned_bulk_volatile_ops_match_byte_for_byte() {
     for (i, byte) in src_buf.iter_mut().enumerate() {
         *byte = (i as u8).wrapping_mul(31).wrapping_add(7);
     }
-    let lengths: [usize; 14] = [0, 1, 2, 7, 8, 9, 15, 16, 31, 32, 33, 63, 64, 4096];
+    let lengths: [usize; 18] = [
+        0, 1, 2, 7, 8, 9, 15, 16, 31, 32, 33, 63, 64, 65, 127, 128, 129, 4096,
+    ];
     for dst_align in 0..8 {
         for len in lengths {
             let start = 8 + dst_align;

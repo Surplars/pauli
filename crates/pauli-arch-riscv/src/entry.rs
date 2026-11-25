@@ -77,6 +77,9 @@ core::arch::global_asm!(
     ctx_fp_enabled = const core::mem::offset_of!(VCpuContext, fp_enabled),
     ctx_tlb_flags = const core::mem::offset_of!(VCpuContext, tlb_flags),
     ctx_guest_file = const core::mem::offset_of!(VCpuContext, guest_file),
+    ctx_vstimecmp = const core::mem::offset_of!(VCpuContext, vstimecmp),
+    ctx_sstc_enabled = const core::mem::offset_of!(VCpuContext, sstc_enabled),
+    csr_vstimecmp = const bits::CSR_VSTIMECMP,
     host_ra = const core::mem::offset_of!(HostFrame, registers) + 0 * core::mem::size_of::<usize>(),
     host_s0 = const core::mem::offset_of!(HostFrame, registers) + 1 * core::mem::size_of::<usize>(),
     host_s1 = const core::mem::offset_of!(HostFrame, registers) + 2 * core::mem::size_of::<usize>(),
@@ -104,6 +107,7 @@ core::arch::global_asm!(
     host_stval = const core::mem::offset_of!(HostFrame, stval),
     host_htval = const core::mem::offset_of!(HostFrame, htval),
     host_htinst = const core::mem::offset_of!(HostFrame, htinst),
+    host_vstimecmp = const core::mem::offset_of!(HostFrame, vstimecmp),
     host_senvcfg = const core::mem::offset_of!(HostFrame, senvcfg),
     host_scounteren = const core::mem::offset_of!(HostFrame, scounteren),
     host_mode = const core::mem::offset_of!(HostFrame, mode),
@@ -141,6 +145,7 @@ core::arch::global_asm!(
     privilege_shift = const bits::SSTATUS_SPP.trailing_zeros(),
     privilege_bit = const 1,
     sstatus_spp = const bits::SSTATUS_SPP,
+    host_external_interrupt = const bits::SEIP,
     host_interrupts = const bits::HOST_GUEST_INTERRUPTS,
     resident_resume = const crate::resident::state::RESUME,
     guest_file_enabled = const cfg!(feature = "aia-guest-file") as usize,
@@ -155,6 +160,14 @@ unsafe extern "C" {
 /// and Ssaia require matching discovered CPU capabilities. Retire every visited
 /// owner's translations before destroying or rewriting any mapped backing.
 pub unsafe fn guest_run(ctx: &mut VCpuContext) -> Result<VmExit, crate::Error> {
+    // SAFETY: forward the same exclusive switch contract.
+    unsafe { guest_run_with_interval(ctx, None) }
+}
+
+pub(crate) unsafe fn guest_run_with_interval(
+    ctx: &mut VCpuContext,
+    interval: Option<&mut pauli_core::arch::TickInterval>,
+) -> Result<VmExit, crate::Error> {
     // SAFETY: exclusive IRQ-masked physical owner and immutable epoch/root.
     unsafe {
         crate::vmid::prepare(ctx)?;
@@ -162,7 +175,7 @@ pub unsafe fn guest_run(ctx: &mut VCpuContext) -> Result<VmExit, crate::Error> {
     // SAFETY: the caller owns the discovered optional bank until restoration.
     let bank = unsafe { crate::aia::load(ctx.aia, ctx.virtual_aia && ctx.hvip & bits::VSEIP != 0) };
     // SAFETY: valid exclusive context/backing and an armed preemption deadline.
-    let exit = unsafe { enter(ctx, crate::resident::state::FULL) };
+    let exit = unsafe { enter(ctx, crate::resident::state::FULL, interval) };
     if let Some(bank) = bank {
         // SAFETY: guest has exited; capture before restoring the matching HS bank.
         unsafe {
@@ -175,11 +188,15 @@ pub unsafe fn guest_run(ctx: &mut VCpuContext) -> Result<VmExit, crate::Error> {
 
 /// # Safety
 /// Same guest_run contract; non-FULL mode additionally owns the loaded resident bank.
-pub(crate) unsafe fn enter(ctx: &mut VCpuContext, mode: usize) -> VmExit {
-    // SAFETY: exclusive live context and matching mode/physical-owner bank contract.
-    unsafe {
-        pauli_guest_enter(ctx, mode);
-    }
+pub(crate) unsafe fn enter(
+    ctx: &mut VCpuContext,
+    mode: usize,
+    interval: Option<&mut pauli_core::arch::TickInterval>,
+) -> VmExit {
+    pauli_core::arch::TickInterval::measure(interval, crate::host::timer::read_time, || {
+        // SAFETY: exclusive live context and matching mode/physical-owner bank contract.
+        unsafe { pauli_guest_enter(ctx, mode) };
+    });
     VmExit {
         cause: ctx.exit_cause,
         value: ctx.exit_value,

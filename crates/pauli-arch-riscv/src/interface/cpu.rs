@@ -31,8 +31,13 @@ impl ArchVcpu for VirtualCpu {
         if boot.payload != pauli_core::board::Payload::Embedded {
             ctx.enable_guest_os();
             // Integer firmware needs VS traps, not an F/D register-bank switch.
-            if boot.payload == pauli_core::board::Payload::Linux && crate::fp::available() {
-                ctx.enable_floating_point().map_err(error)?;
+            if boot.payload == pauli_core::board::Payload::Linux {
+                if crate::fp::available() {
+                    ctx.enable_floating_point().map_err(error)?;
+                }
+                if crate::sstc_available() {
+                    ctx.enable_sstc().map_err(error)?;
+                }
             }
         }
         if config.aia {
@@ -44,13 +49,21 @@ impl ArchVcpu for VirtualCpu {
         Self::reset_secondary(self, entry, opaque, space).map_err(error)
     }
     unsafe fn run(&mut self, opts: arch::RunOptions<'_, Self>) -> Result<arch::VcpuExit> {
+        // SAFETY: forward the caller's exclusive run contract.
+        unsafe { self.run_with_trace(opts, None) }
+    }
+    unsafe fn run_with_trace(
+        &mut self,
+        opts: arch::RunOptions<'_, Self>,
+        mut sample: Option<&mut arch::GuestSample>,
+    ) -> Result<arch::VcpuExit> {
         let mut io = Io {
             inner: opts.io,
             cpu: self.index(),
         };
         // SAFETY: core transfers the IRQ-masked native owner with retained space and sole timer.
         let exit = unsafe {
-            Self::run(
+            Self::run_with_interval(
                 self,
                 crate::vcpu::RunOptions {
                     space: opts.space,
@@ -59,6 +72,7 @@ impl ArchVcpu for VirtualCpu {
                     physical: &mut opts.timer.0,
                     resident: Some(&mut opts.resident.bank),
                 },
+                sample.as_deref_mut().map(|s| &mut s.interval),
             )
         }
         .map_err(error)?;
@@ -68,6 +82,9 @@ impl ArchVcpu for VirtualCpu {
             crate::vcpu::Disposition::Fault => ExitKind::Fault,
             _ => action(exit.sbi.ok_or(HvError::InvalidState)?)?,
         };
+        if let Some(sample) = sample {
+            sample.source = crate::VmExit::source(exit.raw.cause, exit.wfi, exit.mmio);
+        }
         Ok(arch::VcpuExit {
             kind,
             cause: exit.raw.cause,
@@ -76,9 +93,7 @@ impl ArchVcpu for VirtualCpu {
             deadline_reached: exit.host_deadline_reached,
             native_event: matches!(
                 exit.raw.cause,
-                crate::VmExit::SUPERVISOR_SOFTWARE
-                    | crate::VmExit::SUPERVISOR_TIMER
-                    | crate::VmExit::SUPERVISOR_EXTERNAL
+                crate::VmExit::SUPERVISOR_SOFTWARE | crate::VmExit::SUPERVISOR_EXTERNAL
             ),
         })
     }

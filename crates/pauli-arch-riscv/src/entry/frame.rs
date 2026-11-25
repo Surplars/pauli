@@ -36,7 +36,7 @@ pub(super) struct HostFrame {
     pub stval: usize,
     pub htval: usize,
     pub htinst: usize,
-    pub reserved0: usize,
+    pub vstimecmp: usize,
     pub senvcfg: usize,
     pub scounteren: usize,
     pub reserved1: usize,

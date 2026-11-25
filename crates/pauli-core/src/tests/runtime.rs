@@ -189,6 +189,8 @@ fn owner_local_trace_covers_entries_exits_and_decoded_mmio() {
             self.exits += 1;
         }
         fn on_mmio(&mut self, gpa: usize, write: bool) {
+            // Elapsed guest time stays 100 ticks even when HS emulation takes time.
+            super::model::NOW.with(|now| now.set(now.get() + 17));
             self.last_mmio = Some((gpa, write));
         }
     }
@@ -219,4 +221,73 @@ fn owner_local_trace_covers_entries_exits_and_decoded_mmio() {
     let trace = local.tracer();
     assert_eq!((trace.enters, trace.exits), (3, 3));
     assert_eq!(trace.last_mmio, Some((gpa, false)));
+}
+
+#[test]
+fn stats_tracer_records_slices_entries_hs_idle_ticks_and_exit_causes() {
+    use super::model::NOW;
+    use crate::trace::{HS_STATS_MAGIC, HS_STATS_VERSION, HsStats, StatsTracer};
+    use core::sync::atomic::Ordering;
+
+    static STATS: HsStats = HsStats::new();
+    assert_eq!(STATS.magic, HS_STATS_MAGIC);
+    assert_eq!(STATS.version, HS_STATS_VERSION);
+
+    let f = Fixture::new(1, 1);
+    let rt = &f.runtime;
+    rt.manager.start(rt.board, 0).unwrap();
+    let vm = rt.manager.vm(0).unwrap();
+    let cpu = vm.cpu(0).unwrap();
+    {
+        let mut data = cpu.data.lock();
+        let ctx = data.context.as_mut().unwrap();
+        ctx.script.push_back(ExitKind::Resume);
+        ctx.script.push_back(ExitKind::Wait);
+    }
+
+    NOW.with(|n| n.set(1_000));
+    let mut local = Dispatcher::with_tracer(StatsTracer::with_stats(&STATS));
+    assert!(rt.dispatch(&mut local).unwrap());
+    // Simulated CPU executed 2 steps (each +100 ticks in model_cpu::Cpu::run):
+    // step 1: Resume (1000 -> 1100), step 2: Wait (1100 -> 1200).
+    assert_eq!(STATS.slices.load(Ordering::Relaxed), 1);
+    assert_eq!(STATS.entries.load(Ordering::Relaxed), 2);
+    assert_eq!(STATS.guest_ticks.load(Ordering::Relaxed), 200);
+    assert_eq!(STATS.hs_ticks.load(Ordering::Relaxed), 0);
+    assert_eq!(STATS.exit_wfi.load(Ordering::Relaxed), 1);
+    assert_eq!(STATS.exit_other.load(Ordering::Relaxed), 1);
+    assert_eq!(STATS.last_tick.load(Ordering::Relaxed), 1_200);
+
+    // Retain the 50 HS ticks between the last guest exit and WFI.
+    NOW.with(|n| n.set(1_250));
+    rt.idle(&mut local).unwrap();
+    assert_eq!(STATS.hs_ticks.load(Ordering::Relaxed), 50);
+    assert_eq!(STATS.idle_ticks.load(Ordering::Relaxed), 0);
+
+    use crate::arch::{ExitSource, TickInterval};
+    static SEQUENCE: HsStats = HsStats::new();
+    let mut trace = StatsTracer::with_stats(&SEQUENCE);
+    trace.on_guest_interval(
+        0,
+        ExitSource::Other,
+        TickInterval {
+            start: 1_000,
+            end: 1_200,
+        },
+    );
+    trace.on_idle_end(1_300, 50);
+    trace.on_idle_end(1_500, 150);
+    trace.on_guest_interval(
+        0,
+        ExitSource::Wfi,
+        TickInterval {
+            start: 1_575,
+            end: 1_675,
+        },
+    );
+    assert_eq!(SEQUENCE.hs_ticks.load(Ordering::Relaxed), 175);
+    assert_eq!(SEQUENCE.guest_ticks.load(Ordering::Relaxed), 300);
+    assert_eq!(SEQUENCE.idle_ticks.load(Ordering::Relaxed), 200);
+    assert_eq!(SEQUENCE.entries.load(Ordering::Relaxed), 2);
+    assert_eq!(SEQUENCE.last_tick.load(Ordering::Relaxed), 1_675);
 }

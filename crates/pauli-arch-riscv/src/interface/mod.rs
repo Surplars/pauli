@@ -44,6 +44,23 @@ impl HvArch for RiscvHvArch {
         pauli_config::guest_dtb::riscv(config, layout, hz, args, out)
             .map_err(|_| HvError::InvalidImage)
     }
+    fn write_extended_linux_dtb(
+        config: &pauli_config::VmConfig,
+        layout: pauli_config::GuestBoardLayout,
+        hz: u32,
+        args: &str,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        pauli_config::guest_dtb::riscv_with_sstc(
+            config,
+            layout,
+            hz,
+            args,
+            crate::sstc_available(),
+            out,
+        )
+        .map_err(|_| HvError::InvalidImage)
+    }
     fn publish_code() {
         // SAFETY: this native architecture contract includes Zifencei and retained image publication.
         unsafe {

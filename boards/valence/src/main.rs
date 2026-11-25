@@ -28,6 +28,7 @@ extern "C" fn pauli_boot(hart: usize, dtb: usize) -> ! {
         Ok(board) => pauli_core::boot(board, &board::RUNTIME),
         Err(error) => {
             pauli_hal::hv_error!("Wave8 boot: {error:?}");
+            let _ = board::flush_console();
             board::halt()
         }
     }
@@ -35,6 +36,21 @@ extern "C" fn pauli_boot(hart: usize, dtb: usize) -> ! {
 #[cfg(target_os = "none")]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    pauli_hal::hv_error!("Wave8 native HS failure: {info}");
+    if board::flush_console().is_ok() {
+        pauli_hal::hv_error!("Wave8 native HS failure: {info}");
+        let _ = board::flush_console();
+    } else {
+        // A synchronous exception can interrupt the UART lock holder. Use
+        // firmware directly so panic reporting never reacquires that lock.
+        use core::fmt::{self, Write};
+        use pauli_hal::log::Console;
+        struct FirmwareWriter;
+        impl Write for FirmwareWriter {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                pauli_arch_riscv::host::sbi::FirmwareConsole.write(s.as_bytes())
+            }
+        }
+        let _ = writeln!(FirmwareWriter, "[HV] ERROR Wave8 native HS failure: {info}");
+    }
     board::halt()
 }

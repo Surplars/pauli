@@ -156,6 +156,46 @@ pub enum ExitKind {
     Fault,
     Control(Control),
 }
+/// The decoded operation or native interrupt responsible for a guest exit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExitSource {
+    Timer,
+    External,
+    Software,
+    SupervisorCall,
+    Mmio,
+    Wfi,
+    #[default]
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TickInterval {
+    pub start: u64,
+    pub end: u64,
+}
+impl TickInterval {
+    /// Take samples immediately around the switch or WFI, only when requested.
+    #[inline]
+    pub fn measure<T>(out: Option<&mut Self>, now: impl Fn() -> u64, run: impl FnOnce() -> T) -> T {
+        let Some(out) = out else { return run() };
+        let start = now();
+        let result = run();
+        *out = Self { start, end: now() };
+        result
+    }
+
+    pub fn elapsed(self) -> u64 {
+        self.end.wrapping_sub(self.start)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GuestSample {
+    pub interval: TickInterval,
+    pub source: ExitSource,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct VcpuExit {
     pub kind: ExitKind,
@@ -212,6 +252,26 @@ pub trait ArchVcpu: Send + Sized {
     /// Exclusive pinned native owner, IRQs masked, immutable retained space,
     /// armed absolute deadline; no lock spans entry. Put before foreign control.
     unsafe fn run(&mut self, options: RunOptions<'_, Self>) -> Result<VcpuExit>;
+    /// Optional switch telemetry. The default measures the complete architecture
+    /// call. Backends with exit emulation can bracket the native switch itself.
+    /// # Safety
+    /// Same exclusive native-owner and retained-space contract as `run`.
+    unsafe fn run_with_trace(
+        &mut self,
+        options: RunOptions<'_, Self>,
+        sample: Option<&mut GuestSample>,
+    ) -> Result<VcpuExit> {
+        if let Some(sample) = sample {
+            sample.source = ExitSource::Other;
+            TickInterval::measure(Some(&mut sample.interval), Self::Timer::now, || {
+                // SAFETY: the caller retains the same run contract.
+                unsafe { self.run(options) }
+            })
+        } else {
+            // SAFETY: the caller retains the same run contract.
+            unsafe { self.run(options) }
+        }
+    }
     fn set_external_irq(&mut self, asserted: bool);
     fn inject_ipi(&mut self);
     /// Earliest enabled timer that can end this vCPU's WFI, in absolute native ticks.
@@ -332,5 +392,16 @@ pub trait HvArch: Send + Sync + 'static {
         args: &str,
         out: &mut [u8],
     ) -> Result<usize>;
+    /// A board may stage a second canonical variant with host-supported extensions.
+    /// Reshaping preserves the original template's variant and checks all bytes.
+    fn write_extended_linux_dtb(
+        config: &VmConfig,
+        layout: GuestBoardLayout,
+        hz: u32,
+        args: &str,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        Self::write_linux_dtb(config, layout, hz, args, out)
+    }
     fn publish_code();
 }

@@ -48,9 +48,19 @@ pub const MAX_VCPUS: usize = pauli_config::MAX_GUEST_VCPUS as usize;
 pub const VS_PAGE_FAULTS: usize = (1 << 12) | (1 << 13) | (1 << 15);
 pub const VS_OS_EXCEPTIONS: usize = VS_PAGE_FAULTS | 0x1ff;
 static PRESENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static SSTC: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn available() -> bool {
     PRESENT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn sstc_available() -> bool {
+    SSTC.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn init_sstc(available: bool) {
+    SSTC.store(available, core::sync::atomic::Ordering::Relaxed);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +78,51 @@ pub enum Error {
 pub enum VmResetKind {
     Cold,
     Warm,
+}
+
+#[cfg(target_arch = "riscv64")]
+unsafe fn probe_sstc() -> bool {
+    let (env, counters): (usize, usize);
+    // The base H switch already requires access to both CSRs. Test their WARL
+    // bits first, without assuming firmware enabled supervisor compare access.
+    unsafe {
+        core::arch::asm!(
+            ".option push",
+            ".option arch, +h",
+            "csrrs {old}, henvcfg, {stce}",
+            "csrr {env}, henvcfg",
+            "csrw henvcfg, {old}",
+            "csrrsi {old}, hcounteren, {tm}",
+            "csrr {counters}, hcounteren",
+            "csrw hcounteren, {old}",
+            ".option pop",
+            old = out(reg) _,
+            env = out(reg) env,
+            counters = out(reg) counters,
+            stce = in(reg) bits::HENVCFG_STCE,
+            tm = const bits::COUNTER_TIME,
+            options(nostack)
+        );
+    }
+    env & bits::HENVCFG_STCE != 0 && counters & bits::COUNTER_TIME != 0
+}
+
+/// Probe the one physical owner before publishing any vCPU or unmasking STIE.
+/// Multi-hart firmware can configure different machine-mode gates on each hart.
+/// # Safety
+/// The caller owns the boot hart and its timer with local interrupts masked,
+/// has installed the native trap vector and initialized H capabilities, and
+/// supplies the entire native topology. The base H environment CSRs are accessible.
+#[cfg(target_arch = "riscv64")]
+pub unsafe fn init_boot_sstc(native_harts: usize) {
+    let enabled = native_harts == 1 && available() && unsafe { probe_sstc() };
+    // Only the IRQ-masked boot hart can observe this intermediate state.
+    // A successful write both proves mcounteren.TM and disarms the unknown
+    // reset compare. A denied write takes the exact native fixup and selects SBI.
+    SSTC.store(enabled, core::sync::atomic::Ordering::Relaxed);
+    if enabled && !unsafe { host::timer::disarm_boot_sstc() } {
+        SSTC.store(false, core::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 pub fn init_capabilities(hypervisor: bool, floating_point: bool, ssaia: bool) {
