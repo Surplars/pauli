@@ -94,12 +94,14 @@ impl Service {
             *entry = Some(Grant {
                 source,
                 vm: info.vm,
-                rights: Rights::ALL.union(Rights::DESTROY),
+                rights: Rights::ALL.union(Rights::DESTROY).union(Rights::LOG),
+                target_epoch: info.epoch,
             });
         }
         Ok(Reply {
             info,
             changed: true,
+            log: None,
         })
     }
 
@@ -116,6 +118,7 @@ impl Service {
         Ok(Reply {
             info: before,
             changed: true,
+            log: None,
         })
     }
 }

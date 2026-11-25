@@ -48,6 +48,20 @@ fn linux_owns_the_wire_and_peer_tx_still_drains() {
         );
     }
     assert!(!peer.devices.io.lock().console.has_output());
+    assert_eq!(
+        peer.devices.io.lock().console.read_log(0),
+        Ok(pauli_control::ConsoleChunk::Bytes {
+            data: *b"privat",
+            len: 6
+        })
+    );
+    assert_eq!(
+        linux.devices.io.lock().console.read_log(0),
+        Ok(pauli_control::ConsoleChunk::Bytes {
+            data: *wire,
+            len: 6
+        })
+    );
     assert!(rt.board.input.lock().is_empty());
     assert_eq!(monitor.terminal.line(&mut [0; 160]), Some(0));
 }

@@ -19,6 +19,7 @@ See the [UAPI header](../include/uapi/linux/pauli.h).
 | PAULI_DESTROY | 0x74 | pauli_vm (12) | Last status of the retired child (op 4) |
 | PAULI_CREATE | 0x75 | pauli_create (40) | New child ID and epoch (ops 3 / 5 / 7) |
 | PAULI_MEMORY | 0x76 | pauli_memory (16) | Exact unsigned 64-bit memory size in bytes (op 6) |
+| PAULI_LOG_READ | 0x77 | pauli_log (280) | Up to 256 console bytes and next cursor, or an overrun resume cursor (op 8) |
 
 Each FID 1 call carries six scalars `[1, op, id, metadata, lo, hi]`. INSPECT
 uses zero metadata. START, STOP, DESTROY and MEMORY require the target's
@@ -33,6 +34,18 @@ The two name words carry bytes 0–7 and 8–15 in little-endian order. The
 first byte must be an ASCII letter. Remaining characters may also be digits,
 hyphens or underscores. A shorter name requires zero padding through byte
 15. A 16-character name fills both words. Only scalar values reach HS.
+
+For `PAULI_LOG_READ`, supply the public ID, its nonzero epoch, an
+unsigned 64-bit byte cursor and zero flags. Start at cursor zero. The driver
+issues up to 43 scalar reads `[1,8,id,epoch,cursor,0]` per ioctl. Ordinarily
+`data[0..len)` holds the bytes and `cursor` advances by `len`. A zero
+length and zero flags means the cursor has reached the current end.
+If the requested byte has been overwritten, the call returns
+`PAULI_LOG_OVERRUN`, zero length and the oldest retained cursor. Clear
+`flags` before submitting that cursor. When an overrun follows data already
+read in the same ioctl, the driver returns those bytes first. A subsequent
+read at the returned cursor reports the gap. Each scalar read checks the
+caller's log grant and the target epoch, including for a terminal VM.
 
 `EPERM` indicates a failed Linux capability check. `EACCES` indicates an
 HS denial. `EINVAL` covers malformed inputs and invalid or missing targets.

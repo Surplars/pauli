@@ -60,4 +60,18 @@ struct pauli_create {
 #define PAULI_CREATE	_IOWR('P', 0x75, struct pauli_create)
 #define PAULI_MEMORY	_IOWR('P', 0x76, struct pauli_memory)
 
+#define PAULI_LOG_CHUNK	256
+#define PAULI_LOG_OVERRUN	(1U << 0)
+
+struct pauli_log {
+	__u32 id;
+	__u32 epoch;	/* Input: exact target epoch, including after stop. */
+	__u64 cursor;	/* In: next byte to read. Out: next byte or overrun resume. */
+	__u32 len;	/* Out: valid bytes in data. */
+	__u32 flags;	/* In: zero. Out: zero or PAULI_LOG_OVERRUN. */
+	__u8 data[PAULI_LOG_CHUNK];
+};
+
+#define PAULI_LOG_READ	_IOWR('P', 0x77, struct pauli_log)
+
 #endif /* _UAPI_LINUX_PAULI_H */

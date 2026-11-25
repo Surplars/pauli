@@ -52,6 +52,9 @@ impl Backend for Domains {
     fn input(&mut self, _: VmId, _: u8) -> Result<(), Error> {
         Err(Error::Unsupported)
     }
+    fn console_read(&self, _: VmId, _: u32, cursor: u64) -> Result<ConsoleChunk, Error> {
+        super::logs::read_sample(cursor)
+    }
     fn grant_page(&self) -> Result<&'static mut GrantPage, Error> {
         self.pages
             .set(self.pages.get().checked_sub(1).ok_or(Error::NoSpace)?);
@@ -117,6 +120,12 @@ fn directory_growth_preserves_create_revoke_and_epoch_bound_destruction() {
     assert_eq!(b.pages.get(), 0);
     assert_eq!(s.list(admin, &b).count(), 97);
     let inspect = request(high.vm.0, 0, Operation::Inspect);
+    let read = request(high.vm.0, high.epoch, Operation::ConsoleRead(0));
+    assert_eq!(
+        s.execute(admin, read, &mut b).unwrap().log,
+        Some(super::logs::read_sample(0).unwrap())
+    );
+    assert_eq!(s.execute(peer, read, &mut b), Err(Error::Denied));
     assert_eq!(s.execute(peer, inspect, &mut b), Err(Error::Denied));
     s.grant(Caller::Host, 3, high.vm, Rights::INSPECT, &b)
         .unwrap();

@@ -10,7 +10,7 @@ impl Monitor {
     ) -> Result<()> {
         match command {
             Command::Empty => {}
-            Command::Help => self.terminal.output.host(format_args!("vm list/status [name]; vm capacity; vm disks\nvm quota <manager> [<children> <vcpus> <MiB>|clear]\nvm create <template> <name> [--vcpus N] [--memory-mib N] [--disk N]; vm destroy <name>\nvm start <name> [--attach]\nvm attach/stop <name>; vm detach\nvm grant <source> <target> <inspect,start,stop,console,create,shape,diskN,destroy|all>\nvm revoke <source> <target>; shutdown\nCtrl+] detaches without stopping the VM\n")),
+            Command::Help => self.terminal.output.host(format_args!("vm list/status [name]; vm capacity; vm disks\nvm quota <manager> [<children> <vcpus> <MiB>|clear]\nvm create <template> <name> [--vcpus N] [--memory-mib N] [--disk N]; vm destroy <name>\nvm start <name> [--attach]\nvm attach/stop <name>; vm detach\nvm grant <source> <target> <inspect,start,stop,console,log,create,shape,diskN,destroy|all>\nvm revoke <source> <target>; shutdown\nCtrl+] detaches without stopping the VM\n")),
             Command::Disks => self.disks(runtime),
             Command::Capacity => {
                 self.terminal.output.host(format_args!(
@@ -114,7 +114,8 @@ impl Monitor {
                 // An unchanged epoch is never re-granted on a normal poll.
                 let rights = pauli_control::Rights::INSPECT
                     .union(pauli_control::Rights::START)
-                    .union(pauli_control::Rights::STOP);
+                    .union(pauli_control::Rights::STOP)
+                    .union(pauli_control::Rights::LOG);
                 if let Err(error) = self.service.grant(
                     Caller::Host,
                     epoch,

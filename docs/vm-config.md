@@ -76,7 +76,7 @@ vm start <name> [--attach]
 vm attach <name>
 vm detach
 vm stop <name>
-vm grant <source> <target> <inspect,start,stop,console,create,shape,diskN,destroy|all>
+vm grant <source> <target> <inspect,start,stop,console,log,create,shape,diskN,destroy|all>
 vm revoke <source> <target>
 shutdown
 ```
@@ -153,8 +153,8 @@ total. Only the native monitor sets/clears limits; no explicit quota means
 board capacity only. RAM charges sum the children's actual bytes, so two
 512 KiB guests use exactly 1 MiB. Stopped children still count. A cold restart revokes
 old credentials, not resource charges. A sponsor can be destroyed only after
-all its children have actually been destroyed. The creator receives inspect/start/stop/console and
-destroy rights on its new child, not create rights on other templates.
+all its children have actually been destroyed. The creator receives inspect, start,
+stop, console, log and destroy rights on its new child.
 The scalar SBI management ABI (EID `0x08004f49`, FID 1) keeps version 1:
 CREATE takes `[1,3,template_id,template_epoch,name_lo,name_hi]`; the name
 is little-endian ASCII with zero padding and success returns `id<<32 | epoch`.
@@ -172,6 +172,21 @@ It neither enumerates peers nor promises free capacity. Management accepts
 16 simultaneous scalar calls across all vCPUs. Its first 64 grants are inline;
 on boards with a domain pool, further grant pages grow from host RAM and revoked
 entries are reused. A failed grant allocation never creates an ownerless child.
+
+CONSOLE_READ takes `[1,8,id,epoch,cursor,0]`. The independent `log` right
+(bit 7) authorizes reads for the granted target epoch and calling VM epoch.
+Use `log` with a known epoch or `inspect,log` for discovery and reading.
+The standalone `all` shorthand retains its value of 15. Stopping or
+faulting the target leaves the last 4096 UART TX bytes readable. Cold
+restart resets the target cursor to zero and expires the previous log grant.
+Reading never consumes output or changes terminal attachment.
+
+Cursor zero denotes the first byte emitted. A successful read packs up to
+six bytes, earliest in bits 0–7, with the byte count in bits 48–50. Advance
+by that count. Zero count denotes the current end. If data was overwritten,
+bit 51 is set, the count is zero and bits 0–47 hold the oldest retained
+cursor to resume from. Bits 52–63 are zero. A cursor beyond the current end
+or an overrun cursor that cannot fit in 48 bits returns an error.
 
 ## Local smoke gate
 

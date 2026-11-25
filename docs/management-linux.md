@@ -60,6 +60,16 @@ retirement. If the backend is still busy, inspect again before deciding
 whether to submit another destroy. The quota sets a ceiling on allocation.
 For a disk-backed child the host must also grant the selected logical
 slot before the manager passes `--disk 0` through `--disk 3` to create.
+
+The creator receives `log` on the child's initial epoch. Run
+`paulictl logs ID --epoch E > child-console.bin` during execution or after
+stop or fault. On QEMU the host can grant read-only log access to another
+peer with `vm grant manager PEER log` and give the manager its epoch. Include
+`inspect` in the grant to allow automatic epoch discovery. The Valence
+manager profile supplies both rights for the fixed service at manager boot.
+Each VM retains its latest 4096 console bytes. A target cold restart clears
+that history and requires fresh log authorization for the new epoch.
+
 Cold-restarting the manager invalidates its grants. A native shutdown rejects
 queued guest creates/starts too. The hypervisor continues to own CPU, memory,
 interrupts and final retirement. See [the scalar ABI and permissions](vm-config.md).

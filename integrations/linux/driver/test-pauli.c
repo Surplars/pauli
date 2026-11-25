@@ -50,6 +50,7 @@ static struct {
 	unsigned int ecalls, reads, writes;
 	unsigned long words[8];
 	struct sbiret reply;
+	struct sbiret (*log_reply)(unsigned long cursor);
 } mock;
 static struct miscdevice *registered;
 static int sbi_present = 1;
@@ -87,6 +88,11 @@ static struct sbiret sbi_ecall(unsigned long eid, unsigned long fid, unsigned lo
 	unsigned long words[] = {eid, fid, a0, a1, a2, a3, a4, a5};
 	++mock.ecalls;
 	memcpy(mock.words, words, sizeof(words));
+	if (mock.log_reply) {
+		assert(eid == 0x08004f49 && fid == 1 && a0 == 1 && a1 == 8);
+		assert(a2 == 2 && a3 == 7 && a5 == 0);
+		return mock.log_reply(a4);
+	}
 	return mock.reply;
 }
 static int misc_register(struct miscdevice *device)
@@ -114,6 +120,7 @@ static_assert(PAULI_INFO == 0x80085070U && PAULI_INSPECT == 0xc00c5071U);
 static_assert(PAULI_START == 0xc00c5072U && PAULI_STOP == 0xc00c5073U);
 static_assert(PAULI_DESTROY == 0xc00c5074U && PAULI_CREATE == 0xc0285075U);
 static_assert(PAULI_MEMORY == 0xc0105076U);
+static_assert(PAULI_LOG_READ == 0xc1185077U && sizeof(struct pauli_log) == 280);
 static_assert(sizeof(struct pauli_info) == 8 && sizeof(struct pauli_vm) == 12);
 static_assert(offsetof(struct pauli_vm, changed) == 11);
 static_assert(sizeof(struct pauli_create) == 40 && offsetof(struct pauli_create, epoch) == 4);
@@ -157,7 +164,7 @@ static void probe(void)
 static void permissions_and_info(void)
 {
 	const unsigned int cmds[] = {PAULI_INFO, PAULI_INSPECT, PAULI_START, PAULI_STOP,
-				     PAULI_DESTROY, PAULI_CREATE, PAULI_MEMORY};
+				     PAULI_DESTROY, PAULI_CREATE, PAULI_MEMORY, PAULI_LOG_READ};
 	struct pauli_info info;
 	for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); ++i) {
 		assert(call(cmds[i], NULL) == -EPERM);
@@ -258,6 +265,101 @@ static void memory_bytes(void)
 	mem.id = 9;
 	rejected(PAULI_MEMORY, &mem);
 }
+
+static const u64 log_start = 0x100000001ULL;
+static u64 log_end, oldest;
+static unsigned int overrun_call, stale_call, scalar_size;
+
+static unsigned char stream_byte(u64 cursor)
+{
+	return (unsigned char)((cursor - log_start) * 127);
+}
+
+static struct sbiret log_stream(unsigned long cursor)
+{
+	u64 value = 0;
+	unsigned int count = 0;
+
+	if (mock.ecalls == stale_call)
+		return (struct sbiret){SBI_ERR_INVALID_STATE, 0};
+	if (mock.ecalls == overrun_call)
+		oldest = cursor + 256;
+	if (cursor < oldest)
+		return (struct sbiret){0, 1ULL << 51 | oldest};
+	if (cursor > log_end)
+		return (struct sbiret){SBI_ERR_INVALID_PARAM, 0};
+	while (count < scalar_size && cursor + count < log_end) {
+		value |= (u64)stream_byte(cursor + count) << (8 * count);
+		count++;
+	}
+	return (struct sbiret){0, (u64)count << 48 | value};
+}
+
+static void logs(void)
+{
+	struct pauli_log log = {.id = 2, .epoch = 7, .cursor = log_start};
+	mock.log_reply = log_stream;
+	scalar_size = 6;
+	oldest = log_start;
+	log_end = log_start + 259;
+	log.len = ~0U; /* output-only */
+	memset(log.data, 0xa5, sizeof(log.data));
+	assert(call(PAULI_LOG_READ, &log) == 0 && mock.ecalls == 43 && mock.writes == 1);
+	assert(log.id == 2 && log.epoch == 7 && !log.flags && log.len == 256);
+	assert(log.cursor == log_start + 256);
+	for (unsigned int i = 0; i < log.len; i++)
+		assert(log.data[i] == stream_byte(log_start + i));
+	assert(call(PAULI_LOG_READ, &log) == 0 && mock.ecalls == 2);
+	assert(!log.flags && log.len == 3 && log.cursor == log_end);
+	for (unsigned int i = 0; i < sizeof(log.data); i++)
+		assert(log.data[i] == (i < 3 ? stream_byte(log_start + 256 + i) : 0));
+	assert(call(PAULI_LOG_READ, &log) == 0 && mock.ecalls == 1);
+	assert(!log.flags && !log.len && log.cursor == log_end);
+	log.cursor++;
+	assert(call(PAULI_LOG_READ, &log) == -EINVAL && !mock.writes);
+
+	log.cursor = log_start;
+	scalar_size = 1; /* Short data replies also obey the 43-call budget. */
+	assert(call(PAULI_LOG_READ, &log) == 0 && mock.ecalls == 43);
+	assert(log.len == 43 && log.cursor == log_start + 43);
+	log.cursor = log_start;
+	scalar_size = 6;
+	stale_call = 2;
+	assert(call(PAULI_LOG_READ, &log) == -EAGAIN && mock.ecalls == 2 && !mock.writes);
+	assert(log.cursor == log_start);
+	stale_call = 0;
+	overrun_call = 2;
+	assert(call(PAULI_LOG_READ, &log) == 0 && mock.ecalls == 2);
+	assert(log.len == 6 && log.cursor == log_start + 6 && !log.flags);
+	for (unsigned int i = 0; i < log.len; i++)
+		assert(log.data[i] == stream_byte(log_start + i));
+	overrun_call = 0;
+	log_end = oldest + 1;
+	assert(call(PAULI_LOG_READ, &log) == 0 && mock.ecalls == 1);
+	assert(log.len == 0 && log.cursor == oldest && log.flags == PAULI_LOG_OVERRUN);
+	rejected(PAULI_LOG_READ, &log); /* Clear output flags before resubmitting. */
+	log.flags = 0;
+	assert(call(PAULI_LOG_READ, &log) == 0 && log.len == 1 && log.cursor == log_end);
+	assert(log.data[0] == stream_byte(oldest));
+	mock.log_reply = NULL;
+
+	log.epoch = 0;
+	rejected(PAULI_LOG_READ, &log);
+	log.epoch = 7; log.id = 0;
+	rejected(PAULI_LOG_READ, &log);
+	log.id = 9;
+	rejected(PAULI_LOG_READ, &log);
+	log.id = 2;
+	const u64 malformed[] = {1ULL << 52, 7ULL << 48, 9ULL << 48, 1ULL << 51 | log.cursor};
+	for (size_t i = 0; i < sizeof(malformed)/sizeof(malformed[0]); i++) {
+		mock.reply.value = malformed[i];
+		assert(call(PAULI_LOG_READ, &log) == -EIO && mock.ecalls == 1 && !mock.writes);
+	}
+	log.cursor = ~0ULL;
+	mock.reply.value = 1ULL << 48;
+	assert(call(PAULI_LOG_READ, &log) == -EIO && !mock.writes);
+	mock.reply.value = 0;
+}
 static void errors_and_copy_faults(void)
 {
 	const struct { long sbi; int error; } errors[] = {
@@ -267,9 +369,11 @@ static void errors_and_copy_faults(void)
 	struct pauli_create create = template();
 	struct pauli_vm vm = {.id = 2, .epoch = 7};
 	struct pauli_memory mem = {.id = 2, .epoch = 7};
+	struct pauli_log log = {.id = 2, .epoch = 7};
 	struct pauli_info info;
 	const struct { unsigned int cmd; void *arg; } requests[] = {
 		{PAULI_START, &vm}, {PAULI_DESTROY, &vm}, {PAULI_CREATE, &create}, {PAULI_MEMORY, &mem},
+		{PAULI_LOG_READ, &log},
 	};
 	for (size_t i = 0; i < sizeof(requests)/sizeof(requests[0]); ++i) {
 		mock.read_fault = true;
@@ -298,9 +402,10 @@ int main(void)
 	creates();
 	rejected_creates();
 	memory_bytes();
+	logs();
 	errors_and_copy_faults();
 	hv_exit();
 	assert(!registered);
-	puts("PASS: Pauli driver probe, ioctl ABI, SBI words and replies, validation, credentials and copy faults");
+	puts("PASS: Pauli driver probe, ioctl ABI, SBI words and replies, log chunks and overruns, validation, credentials and copy faults");
 	return 0;
 }

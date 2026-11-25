@@ -29,13 +29,18 @@ insmod "/lib/modules/$(uname -r)/extra/pauli.ko"  # not needed with built-in dri
 /usr/sbin/paulictl status service
 /usr/sbin/paulictl start service
 /usr/sbin/paulictl status service
-/usr/sbin/paulictl stop service
-/usr/sbin/paulictl status service
+/usr/sbin/paulictl stop service --wait
+/usr/sbin/paulictl logs service > /tmp/service-console.bin
 ```
 
 Install kmod or enable the BusyBox insmod applet for a module-based image.
 Start and stop inspect the current epoch unless you supply `--epoch E`.
-Use `paulictl stop service --wait` to wait for a terminal status. The
+After the service has emitted a heartbeat, the final command captures its
+retained UART bytes even after stop. During the run, use
+`paulictl logs service --follow` to watch the same stream. The board grants
+log access for that service epoch. A cold restart starts a fresh log and
+expires the previous log grant. For this command install matching firmware,
+driver and CLI versions that implement opcode 8 and ioctl 0x77. The
 packaged tool also supports listing, exact memory queries and child
 provisioning when the manager has the corresponding grants and quota. Booting the ordinary guest profile
 should still give Linux login but never peer control rights. For the new

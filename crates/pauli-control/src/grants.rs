@@ -8,6 +8,9 @@ pub(super) struct Grant {
     pub source: u32,
     pub vm: VmId,
     pub rights: Rights,
+    /// LOG is specific to the bytes of this incarnation. Lifecycle authority
+    /// still applies to the configured resource across a cold restart.
+    pub target_epoch: u32,
 }
 pub struct GrantPage {
     entries: [Option<Grant>; PER_PAGE],
@@ -20,10 +23,11 @@ impl GrantPage {
             next: None,
         }
     }
-    pub(super) fn allows(&self, source: u32, vm: VmId, right: Rights) -> bool {
+    pub(super) fn get(&self, source: u32, vm: VmId) -> Option<Grant> {
         core::iter::successors(Some(self), |p| p.next.as_deref())
             .flat_map(|p| p.entries.iter().flatten())
-            .any(|g| g.source == source && g.vm == vm && g.rights.contains(right))
+            .find(|g| g.source == source && g.vm == vm)
+            .copied()
     }
     fn entries_mut(&mut self) -> impl Iterator<Item = &mut Option<Grant>> {
         let mut next = Some(self);

@@ -2,7 +2,10 @@
 //! cross this boundary. RISC-V carries the six words in a0..a5 (FID=1).
 //! Ownership/Lock Ordering: by-value scalar conversion; no locks or backend access.
 //! Invariants: caller identity and pointers are never accepted from request words.
-use crate::{ChildName, ChildSpec, DiskSlot, Error, Operation, Reply, Request, Shape, State, VmId};
+use crate::{
+    ChildName, ChildSpec, ConsoleChunk, DiskSlot, Error, Operation, Reply, Request, Shape, State,
+    VmId,
+};
 use core::num::{NonZeroU8, NonZeroU16};
 
 pub const EID: u32 = 0x0800_4f49;
@@ -19,6 +22,7 @@ pub const INVALID_STATE: i64 = -10;
 pub const CREATE_SHAPED: u64 = 5;
 pub const MEMORY_BYTES: u64 = 6;
 pub const CREATE_DISK: u64 = 7;
+pub const CONSOLE_READ: u64 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Return {
@@ -39,7 +43,8 @@ pub fn decode(args: [u64; 6]) -> Result<Request, i64> {
     if args[2] == 0
         || args[2] > u32::MAX as u64
         || (!matches!(args[1], CREATE_SHAPED | CREATE_DISK) && args[3] > u32::MAX as u64)
-        || (!matches!(args[1], 3 | CREATE_SHAPED | CREATE_DISK) && (args[4] != 0 || args[5] != 0))
+        || (!matches!(args[1], 3 | CREATE_SHAPED | CREATE_DISK | CONSOLE_READ)
+            && (args[4] != 0 || args[5] != 0))
     {
         return Err(INVALID_PARAM);
     }
@@ -73,6 +78,7 @@ pub fn decode(args: [u64; 6]) -> Result<Request, i64> {
         }
         4 if args[3] != 0 => Operation::Destroy,
         MEMORY_BYTES if epoch != 0 => Operation::MemoryBytes,
+        CONSOLE_READ if epoch != 0 && args[5] == 0 => Operation::ConsoleRead(args[4]),
         _ => return Err(INVALID_PARAM),
     };
     Ok(Request {
@@ -94,8 +100,28 @@ pub fn encode_for(operation: Operation, result: Result<Reply, Error>) -> Return 
             error: 0,
             value: reply.info.memory_bytes,
         },
+        (Operation::ConsoleRead(_), Ok(reply)) => match reply.log {
+            Some(chunk) => encode_log(chunk),
+            None => Return::error(FAILED),
+        },
         _ => encode(result),
     }
+}
+
+fn encode_log(chunk: ConsoleChunk) -> Return {
+    let value = match chunk {
+        ConsoleChunk::Bytes { data, len } => {
+            let Some(payload) = data.get(..usize::from(len)) else {
+                return Return::error(INVALID_PARAM);
+            };
+            let mut bytes = [0u8; 8];
+            bytes[..payload.len()].copy_from_slice(payload);
+            u64::from_le_bytes(bytes) | (u64::from(len) << 48)
+        }
+        ConsoleChunk::Overrun { resume } if resume < 1 << 48 => resume | (1 << 51),
+        ConsoleChunk::Overrun { .. } => return Return::error(INVALID_PARAM),
+    };
+    Return { error: 0, value }
 }
 
 /// Explicit codes, independent of Rust enum discriminants. The upper bits of

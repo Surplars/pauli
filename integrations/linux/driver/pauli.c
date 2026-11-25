@@ -20,7 +20,7 @@
 enum pauli_sbi_op {
 	OP_INSPECT = 0, OP_START = 1, OP_STOP = 2, OP_CREATE = 3,
 	OP_DESTROY = 4, OP_CREATE_SHAPED = 5, OP_MEMORY_BYTES = 6,
-	OP_CREATE_DISK = 7,
+	OP_CREATE_DISK = 7, OP_CONSOLE_READ = 8,
 };
 
 /* Status layout shared with pauli-control/src/abi.rs. */
@@ -29,6 +29,12 @@ enum pauli_sbi_op {
 #define STATUS_ACTIVE	BIT_ULL(40)
 #define STATUS_VCPUS	GENMASK_ULL(48, 41)
 #define STATUS_CHANGED	BIT_ULL(49)
+
+#define LOG_PAYLOAD	GENMASK_ULL(47, 0)
+#define LOG_COUNT	GENMASK_ULL(50, 48)
+#define LOG_OVERRUN	BIT_ULL(51)
+#define LOG_SCALAR_BYTES	6
+#define LOG_MAX_CALLS	((PAULI_LOG_CHUNK + LOG_SCALAR_BYTES - 1) / LOG_SCALAR_BYTES)
 
 static struct pauli_info hv_info;
 
@@ -129,6 +135,51 @@ static long hv_memory(void __user *arg)
 	return copy_to_user(arg, &req, sizeof(req)) ? -EFAULT : 0;
 }
 
+static long hv_log_read(void __user *arg)
+{
+	struct pauli_log req = {};
+	unsigned int calls;
+
+	if (copy_from_user(&req, arg, offsetof(struct pauli_log, data)))
+		return -EFAULT;
+	if (!valid_id(req.id) || !req.epoch || req.flags)
+		return -EINVAL;
+	req.len = 0;
+	for (calls = 0; calls < LOG_MAX_CALLS; calls++) {
+		struct sbiret ret = hv_call(OP_CONSOLE_READ, req.id, req.epoch, req.cursor, 0);
+		u64 word = (u64)ret.value;
+		unsigned int i, count = FIELD_GET(LOG_COUNT, word);
+		int err = hv_errno(ret.error);
+
+		if (err)
+			return err;
+		if ((word >> 52) || count > LOG_SCALAR_BYTES)
+			return -EIO;
+		if (word & LOG_OVERRUN) {
+			u64 resume = word & LOG_PAYLOAD;
+
+			if (count || resume <= req.cursor)
+				return -EIO;
+			if (!req.len) {
+				req.cursor = resume;
+				req.flags = PAULI_LOG_OVERRUN;
+			}
+			break;
+		}
+		if (!count)
+			break;
+		/* The last scalar can straddle the ioctl buffer boundary. */
+		if (count > PAULI_LOG_CHUNK - req.len)
+			count = PAULI_LOG_CHUNK - req.len;
+		if (req.cursor + count < req.cursor)
+			return -EIO;
+		for (i = 0; i < count; i++)
+			req.data[req.len++] = word >> (8 * i);
+		req.cursor += count;
+	}
+	return copy_to_user(arg, &req, sizeof(req)) ? -EFAULT : 0;
+}
+
 static long hv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	void __user *out = (void __user *)arg;
@@ -163,6 +214,8 @@ static long hv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return hv_create(out);
 	case PAULI_MEMORY:
 		return hv_memory(out);
+	case PAULI_LOG_READ:
+		return hv_log_read(out);
 	default:
 		return -ENOTTY;
 	}
@@ -213,6 +266,13 @@ static int __init hv_init(void)
 	static_assert(offsetof(struct pauli_create, disk) == 19);
 	static_assert(offsetof(struct pauli_create, flags) == 20);
 	static_assert(offsetof(struct pauli_create, name) == 24);
+	static_assert(sizeof(struct pauli_log) == 280);
+	static_assert(offsetof(struct pauli_log, id) == 0);
+	static_assert(offsetof(struct pauli_log, epoch) == 4);
+	static_assert(offsetof(struct pauli_log, cursor) == 8);
+	static_assert(offsetof(struct pauli_log, len) == 16);
+	static_assert(offsetof(struct pauli_log, flags) == 20);
+	static_assert(offsetof(struct pauli_log, data) == 24);
 	if (sbi_probe_extension(PAULI_SBI_EID) <= 0)
 		return -ENODEV;
 	ret = sbi_ecall(PAULI_SBI_EID, 0, 0, 0, 0, 0, 0, 0);

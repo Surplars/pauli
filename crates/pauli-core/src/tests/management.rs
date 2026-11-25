@@ -238,5 +238,16 @@ fn queued_management_creation_or_start_cannot_reopen_shutdown_admission() {
     assert_eq!(call([1, 0, 2, 0, 0, 0], false).error, 0);
     assert_eq!(rt.manager.vms().count(), 2);
     assert!(!target.info(VmId(2)).unwrap().active);
-    assert_eq!(call(create, true).error, 0); // Valid authority and sufficient RAM, not a false positive.
+    assert_eq!(
+        call([1, abi::CONSOLE_READ, 2, epoch, 0, 0], true).error,
+        abi::DENIED
+    );
+    let child = call(create, true);
+    assert_eq!(child.error, 0);
+    let (id, epoch) = (child.value >> 32, u64::from(child.value as u32));
+    assert_eq!(
+        call([1, abi::CONSOLE_READ, id, epoch, 0, 0], false),
+        abi::Return { error: 0, value: 0 },
+        "creation grants the sponsor LOG on the new child's empty console"
+    );
 }

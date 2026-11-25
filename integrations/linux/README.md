@@ -34,24 +34,24 @@ protocol on the serial port and no dependency on KVM, a network or a daemon.
 ## Acceptance on a management boot
 
 Run as root inside Debian. There is no `hv>` login or serial escape to grant
-rights. The native manager profile gives VM 1 only inspect/start/stop on its
-declared service VM (ID 2); ordinary Linux has no cross-VM rights.
+rights. The native manager profile grants VM 1 inspect, start, stop and log
+access to its declared service VM (ID 2). Ordinary Linux has no cross-VM rights.
 
 ```sh
 paulictl info
 paulictl status service
 paulictl start service
 paulictl status service
-paulictl stop service
-paulictl status service
+paulictl stop service --wait
+paulictl logs service > service-console.bin
 ```
 
 `info` reports the ABI and the largest addressable ID, **not** a list of
 accessible VMs. `service` is shorthand for public ID 2 on this board;
 numeric IDs also work. Stop is asynchronous: if status is `stopping`, query
 again until `stopped`. The service runs on its own virtual console; its
-output is not mixed into the Linux shell. Confirm status, not a UART banner.
-Use `paulictl stop service --wait` to wait for a terminal state in the same command.
+bytes remain available through `logs` after it stops. Redirect stdout to
+preserve arbitrary binary output.
 
 ## Commands
 
@@ -62,6 +62,7 @@ paulictl status ID
 paulictl start ID [--epoch E]
 paulictl stop ID [--epoch E] [--wait [--timeout-ms MS]]
 paulictl memory ID [--epoch E]
+paulictl logs ID [--epoch E] [--cursor N] [--follow [--timeout-ms MS]]
 paulictl create TEMPLATE NAME [--epoch E] [--vcpus N] [--memory-mib M] [--disk SLOT]
 paulictl destroy ID [--epoch E]
 ```
@@ -71,6 +72,19 @@ Use a positive decimal public ID or `service` (2) for ID and TEMPLATE.
 for which INSPECT returns access denied or invalid target and reports other
 errors. The rows are successive observations and may change during a scan.
 `memory` uses the inspect grant and reports the exact byte count.
+
+`logs` reads the most recent 4096 guest UART TX bytes of the selected epoch.
+Reading starts at byte offset zero by default. Multiple readers can use
+independent cursors. When the producer has overwritten the requested byte,
+the tool reports the new starting offset on stderr and resumes there. Stdout
+contains exactly the retained bytes. At the current end, a normal read exits
+and `--follow` waits for more bytes. `--timeout-ms` bounds the entire follow
+session. An epoch change ends the read.
+
+Reading requires the separate `log` grant. A reader with only `log` must
+supply `--epoch` because automatic epoch discovery uses `inspect`. A stopped
+or faulted target keeps its log. Cold restart clears it and expires access
+to that target's log. First activation uses the epoch reported at creation.
 
 `create` requires a template grant and quota. The name is 1–16 ASCII bytes,
 starting with a letter and continuing with letters, digits, underscores or

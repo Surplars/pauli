@@ -2,11 +2,11 @@
 //! console command or guest-supplied identity establishes the initial grant.
 use super::Fixture;
 use crate::{
-    monitor::{Monitor, rpc},
+    monitor::{Monitor, backend::Target, rpc},
     runtime::Dispatcher,
     vm::State,
 };
-use pauli_control::{abi, queue::Poll};
+use pauli_control::{Backend, Caller, Error, Rights, Service, VmId, abi, queue::Poll};
 
 fn request(
     f: &Fixture,
@@ -69,6 +69,12 @@ fn extension_discovery_and_boot_names_do_not_confer_authority() {
 
 #[test]
 fn board_grant_is_narrow_and_refreshes_only_for_a_new_manager() {
+    for queued_op in [2, abi::CONSOLE_READ] {
+        check_manager_restart(queued_op);
+    }
+}
+
+fn check_manager_restart(queued_op: u64) {
     let f = domains();
     let rt = &f.runtime;
     rt.board
@@ -91,6 +97,14 @@ fn board_grant_is_narrow_and_refreshes_only_for_a_new_manager() {
     );
 
     let old_peer = peer.epoch();
+    assert_eq!(
+        request(&f, &mut monitor, 0, abi::CONSOLE_READ, 2, old_peer),
+        abi::Return { error: 0, value: 0 }
+    );
+    assert_eq!(
+        request(&f, &mut monitor, 1, abi::CONSOLE_READ, 1, manager.epoch()).error,
+        abi::DENIED
+    );
     assert_eq!(request(&f, &mut monitor, 0, 2, 2, old_peer).error, 0);
     let mut owner = Dispatcher::new();
     for _ in 0..2 {
@@ -100,6 +114,14 @@ fn board_grant_is_narrow_and_refreshes_only_for_a_new_manager() {
     assert!(peer.lifecycle.joined());
     assert_eq!(request(&f, &mut monitor, 0, 1, 2, old_peer).error, 0);
     assert_ne!(peer.epoch(), old_peer);
+    assert_eq!(
+        request(&f, &mut monitor, 0, abi::CONSOLE_READ, 2, old_peer).error,
+        abi::INVALID_STATE
+    );
+    assert_eq!(
+        request(&f, &mut monitor, 0, abi::CONSOLE_READ, 2, peer.epoch()).error,
+        abi::DENIED
+    );
     assert_eq!(
         request(&f, &mut monitor, 0, 2, 2, old_peer).error,
         abi::INVALID_STATE
@@ -111,7 +133,7 @@ fn board_grant_is_narrow_and_refreshes_only_for_a_new_manager() {
     assert_eq!(request(&f, &mut monitor, 0, 0, 2, 0).error, abi::DENIED);
 
     let old_manager = manager.epoch();
-    let words = [abi::VERSION, 2, 2, u64::from(peer.epoch()), 0, 0];
+    let words = [abi::VERSION, queued_op, 2, u64::from(peer.epoch()), 0, 0];
     let stale = rpc::submit(rt, 0, 0, old_manager, words).unwrap();
     manager.host_stop();
     for _ in 0..2 {
@@ -128,5 +150,97 @@ fn board_grant_is_narrow_and_refreshes_only_for_a_new_manager() {
     );
     assert_eq!(peer.lifecycle.state(), State::Ready);
     assert_eq!(request(&f, &mut monitor, 0, 0, 2, 0).error, 0);
+    assert_eq!(
+        request(&f, &mut monitor, 0, abi::CONSOLE_READ, 2, peer.epoch()),
+        abi::Return { error: 0, value: 0 }
+    );
     assert_eq!(request(&f, &mut monitor, 0, 2, 2, peer.epoch()).error, 0);
+}
+
+#[test]
+fn log_remains_readable_while_stopping_and_after_join_until_cold_restart() {
+    for fault in [false, true] {
+        let f = domains();
+        let rt = &f.runtime;
+        rt.manager.start(rt.board, 0).unwrap();
+        rt.manager.start(rt.board, 1).unwrap();
+        let source = rt.manager.vm(0).unwrap().epoch();
+        let peer = rt.manager.vm(1).unwrap();
+        let old = peer.epoch();
+        let target = Target(rt);
+        let mut grants = Service::new();
+        let read = |grants: &mut Service, epoch: u32, cursor| {
+            let words = [abi::VERSION, abi::CONSOLE_READ, 2, epoch.into(), cursor, 0];
+            let ticket = rpc::submit(rt, 0, 0, source, words).unwrap();
+            rpc::pump(rt, grants, true);
+            let Poll::Complete(reply) = rpc::poll(rt, ticket) else {
+                panic!("missing log reply")
+            };
+            reply
+        };
+        grants
+            .grant(Caller::Host, source, VmId(2), Rights::ALL, &target)
+            .unwrap();
+        assert_eq!(read(&mut grants, old, 0), abi::Return::error(abi::DENIED));
+        grants
+            .grant(Caller::Host, source, VmId(2), Rights::LOG, &target)
+            .unwrap();
+        let payload = [0, 255, 0x1d, b'\r', b'\n', 0x1e];
+        let mut io = peer.devices.io.lock();
+        for byte in payload {
+            io.console.access(0, Some(usize::from(byte))).unwrap();
+        }
+        drop(io);
+        let expected = abi::Return {
+            error: 0,
+            value: (6 << 48) | u64::from_le_bytes([0, 255, 0x1d, b'\r', b'\n', 0x1e, 0, 0]),
+        };
+        assert_eq!(read(&mut grants, old, 0), expected);
+        assert_eq!(
+            read(&mut grants, old, 6),
+            abi::Return { error: 0, value: 0 }
+        );
+        assert_eq!(
+            read(&mut grants, old, 7),
+            abi::Return::error(abi::INVALID_PARAM)
+        );
+        peer.request_stop(fault, false);
+        assert_eq!(peer.lifecycle.state(), State::Stopping);
+        assert_eq!(read(&mut grants, old, 0), expected);
+        let mut owner = Dispatcher::new();
+        for _ in 0..2 {
+            rt.dispatch(&mut owner).unwrap();
+        }
+        rt.manager.service(rt.board);
+        assert!(peer.lifecycle.joined());
+        assert_eq!(
+            peer.lifecycle.state(),
+            if fault {
+                State::Faulted
+            } else {
+                State::Stopped
+            }
+        );
+        assert_eq!(read(&mut grants, old, 0), expected);
+        rt.manager.start(rt.board, 1).unwrap();
+        let new = peer.epoch();
+        assert_ne!(new, old);
+        assert_eq!(target.console_read(VmId(2), old, 0), Err(Error::StaleEpoch));
+        assert_eq!(
+            read(&mut grants, old, 0),
+            abi::Return::error(abi::INVALID_STATE)
+        );
+        assert_eq!(read(&mut grants, new, 0), abi::Return::error(abi::DENIED));
+        grants
+            .grant(Caller::Host, source, VmId(2), Rights::LOG, &target)
+            .unwrap();
+        assert_eq!(
+            read(&mut grants, new, 0),
+            abi::Return { error: 0, value: 0 }
+        );
+        assert_eq!(
+            read(&mut grants, new, 1),
+            abi::Return::error(abi::INVALID_PARAM)
+        );
+    }
 }

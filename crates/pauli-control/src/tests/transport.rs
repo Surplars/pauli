@@ -108,7 +108,8 @@ fn shaped_wire_keeps_legacy_words_canonical_and_never_rounds_memory_replies() {
             req.operation,
             Ok(Reply {
                 info,
-                changed: false
+                changed: false,
+                log: None,
             })
         ),
         abi::Return {
@@ -181,6 +182,7 @@ fn replies_and_rights() {
                 memory_bytes: 256 << 20,
             },
             changed: true,
+            log: None,
         }));
         assert_eq!(reply.error, 0);
         assert_eq!(reply.value as u32, u32::MAX);

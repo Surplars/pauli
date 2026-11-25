@@ -10,6 +10,7 @@ struct Runtime {
     vms: [Option<Info>; 4],
     next_epoch: u32,
     reads: Cell<usize>,
+    log_read: Cell<Option<(VmId, u32, u64)>>,
     effects: Vec<(VmId, Operation)>,
     fail_boot: bool,
 }
@@ -28,6 +29,7 @@ impl Runtime {
             }),
             next_epoch: 14,
             reads: Cell::new(0),
+            log_read: Cell::new(None),
             effects: Vec::new(),
             fail_boot: false,
         }
@@ -77,6 +79,10 @@ impl Backend for Runtime {
         self.effects.push((vm, Operation::Input(byte)));
         Ok(())
     }
+    fn console_read(&self, vm: VmId, epoch: u32, cursor: u64) -> Result<ConsoleChunk, Error> {
+        self.log_read.set(Some((vm, epoch, cursor)));
+        logs::read_sample(cursor)
+    }
 }
 fn request(vm: u32, epoch: u32, operation: Operation) -> Request {
     Request {
@@ -86,6 +92,7 @@ fn request(vm: u32, epoch: u32, operation: Operation) -> Request {
     }
 }
 
+mod logs;
 mod policy;
 mod scale;
 mod transport;

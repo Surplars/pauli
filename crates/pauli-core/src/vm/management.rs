@@ -196,6 +196,8 @@ impl<A: HvArch> Vm<A> {
             // proved every visited native CPU retired translations before clear.
             unsafe { io.ram.restore_retired(&self.image) }?;
             A::publish_code();
+            // Publish the new epoch under this I/O lock so a log reader cannot see
+            // reset history under the old epoch, or previous bytes under the new one.
             io.console.reset((hz / 1000).max(1));
             io.rtc = crate::backends::rtc::Rtc::new(unix, now, hz);
             self.devices.replace_chip(&mut io, chip, &self.config);

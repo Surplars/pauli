@@ -20,7 +20,8 @@
 struct command {
 	unsigned long op;
 	uint32_t id, epoch, timeout_ms;
-	bool wait;
+	uint64_t cursor;
+	bool wait, follow, has_timeout;
 	struct pauli_create create;
 };
 
@@ -29,18 +30,28 @@ static void usage(FILE *out)
 	fputs("Usage: paulictl info | list | status TARGET\n"
 	      "       paulictl {start|destroy|memory} TARGET [--epoch E]\n"
 	      "       paulictl stop TARGET [--epoch E] [--wait [--timeout-ms MS]]\n"
+	      "       paulictl logs TARGET [--epoch E] [--cursor N] [--follow [--timeout-ms MS]]\n"
 	      "       paulictl create TEMPLATE NAME [--epoch E] [--vcpus N] [--memory-mib M] [--disk 0..3]\n"
 	      "  TARGET and TEMPLATE accept a public VM ID or service (ID 2).\n"
-	      "  Stop waits default to 30000 ms and poll at most every 50 ms.\n", out);
+	      "  Stop waits default to 30000 ms. Log following has no default timeout.\n", out);
 }
 
-static bool number(const char *text, uint32_t min, uint32_t max, uint32_t *out)
+static bool number64(const char *text, uint64_t min, uint64_t max, uint64_t *out)
 {
 	if (!*text || text[strspn(text, "0123456789")] != '\0')
 		return false;
 	errno = 0;
 	uintmax_t n = strtoumax(text, NULL, 10);
 	if (errno || n < min || n > max)
+		return false;
+	*out = (uint64_t)n;
+	return true;
+}
+
+static bool number(const char *text, uint32_t min, uint32_t max, uint32_t *out)
+{
+	uint64_t n;
+	if (!number64(text, min, max, &n))
 		return false;
 	*out = (uint32_t)n;
 	return true;
@@ -71,6 +82,7 @@ static bool parse_command(int argc, char **argv, struct command *cmd)
 		{"info", PAULI_INFO}, {"list", LIST_COMMAND}, {"status", PAULI_INSPECT},
 		{"start", PAULI_START}, {"stop", PAULI_STOP}, {"destroy", PAULI_DESTROY},
 		{"create", PAULI_CREATE}, {"memory", PAULI_MEMORY},
+		{"logs", PAULI_LOG_READ},
 	};
 	*cmd = (struct command){.timeout_ms = DEFAULT_TIMEOUT_MS};
 	if (argc < 2)
@@ -88,7 +100,7 @@ static bool parse_command(int argc, char **argv, struct command *cmd)
 		return argc == 3;
 
 	int i = 3;
-	bool has_timeout = false;
+	bool has_cursor = false;
 	if (cmd->op == PAULI_CREATE) {
 		if (i == argc || !valid_name(argv[i]))
 			return false;
@@ -101,6 +113,10 @@ static bool parse_command(int argc, char **argv, struct command *cmd)
 			cmd->wait = true;
 			continue;
 		}
+		if (!strcmp(option, "--follow") && cmd->op == PAULI_LOG_READ && !cmd->follow) {
+			cmd->follow = true;
+			continue;
+		}
 		if (i == argc)
 			return false;
 		const char *value = argv[i++];
@@ -108,10 +124,15 @@ static bool parse_command(int argc, char **argv, struct command *cmd)
 		if (!strcmp(option, "--epoch") && !cmd->epoch) {
 			if (!number(value, 1, UINT32_MAX, &cmd->epoch))
 				return false;
-		} else if (!strcmp(option, "--timeout-ms") && cmd->op == PAULI_STOP && !has_timeout) {
+		} else if (cmd->op == PAULI_LOG_READ && !strcmp(option, "--cursor") && !has_cursor) {
+			if (!number64(value, 0, UINT64_MAX, &cmd->cursor))
+				return false;
+			has_cursor = true;
+		} else if (!strcmp(option, "--timeout-ms") && !cmd->has_timeout &&
+			   (cmd->op == PAULI_STOP || cmd->op == PAULI_LOG_READ)) {
 			if (!number(value, 0, UINT32_MAX, &cmd->timeout_ms))
 				return false;
-			has_timeout = true;
+			cmd->has_timeout = true;
 		} else if (cmd->op == PAULI_CREATE && !strcmp(option, "--vcpus") && !cmd->create.vcpus) {
 			if (!number(value, 1, UINT8_MAX, &n))
 				return false;
@@ -128,7 +149,7 @@ static bool parse_command(int argc, char **argv, struct command *cmd)
 			return false;
 		}
 	}
-	return !has_timeout || cmd->wait;
+	return !cmd->has_timeout || cmd->wait || cmd->follow;
 }
 
 static const char *state_name(unsigned int state)
@@ -174,6 +195,34 @@ static bool before(struct timespec a, struct timespec b)
 	return a.tv_sec < b.tv_sec || (a.tv_sec == b.tv_sec && a.tv_nsec < b.tv_nsec);
 }
 
+/* Check even a busy stream's deadline; only sleep when polling for new data. */
+static int next_poll(const struct timespec *limit, bool idle)
+{
+	struct timespec now;
+	if (!limit && !idle)
+		return 0;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+		return -1;
+	if (limit && !before(now, *limit)) {
+		errno = ETIMEDOUT;
+		return -1;
+	}
+	if (!idle)
+		return 0;
+	struct timespec next = plus_ms(now, POLL_MS);
+	if (limit && before(*limit, next))
+		next = *limit;
+	int error;
+	do {
+		error = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+	} while (error == EINTR);
+	if (error) {
+		errno = error;
+		return -1;
+	}
+	return 0;
+}
+
 static int wait_stop(int fd, struct pauli_vm *vm, uint32_t timeout_ms)
 {
 	const uint32_t id = vm->id, epoch = vm->epoch;
@@ -194,23 +243,48 @@ static int wait_stop(int fd, struct pauli_vm *vm, uint32_t timeout_ms)
 			vm->changed = changed;
 			return 0;
 		}
-		if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+		if (next_poll(&limit, true) < 0)
 			return -1;
-		if (!before(now, limit)) {
-			errno = ETIMEDOUT;
+	}
+}
+
+static int read_logs(int fd, const struct command *cmd, uint32_t epoch)
+{
+	uint64_t cursor = cmd->cursor;
+	struct timespec limit;
+	const struct timespec *deadline = cmd->has_timeout ? &limit : NULL;
+	if (deadline) {
+		if (clock_gettime(CLOCK_MONOTONIC, &limit) < 0)
+			return -1;
+		limit = plus_ms(limit, cmd->timeout_ms);
+	}
+	for (;;) {
+		struct pauli_log log = {.id = cmd->id, .epoch = epoch, .cursor = cursor};
+		if (ioctl(fd, PAULI_LOG_READ, &log) < 0)
+			return -1;
+		if (log.epoch != epoch) {
+			errno = ESTALE;
 			return -1;
 		}
-		struct timespec next = plus_ms(now, POLL_MS);
-		if (before(limit, next))
-			next = limit;
-		int error;
-		do {
-			error = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
-		} while (error == EINTR);
-		if (error) {
-			errno = error;
+		if (log.flags == PAULI_LOG_OVERRUN && !log.len && log.cursor > cursor) {
+			fprintf(stderr, "paulictl: log overrun at cursor %" PRIu64
+				", resuming at %" PRIu64 "\n", cursor, (uint64_t)log.cursor);
+		} else if (log.flags || log.len > sizeof(log.data) || log.cursor < cursor ||
+			   log.cursor - cursor != log.len) {
+			errno = EPROTO;
 			return -1;
+		} else if (log.len) {
+			if (fwrite(log.data, 1, log.len, stdout) != log.len || fflush(stdout) == EOF)
+				return -1;
+		} else if (!cmd->follow) {
+			return 0;
 		}
+		cursor = log.cursor;
+		if (!log.len && !log.flags && next_poll(deadline, true) < 0)
+			return -1;
+		/* A sleep can end at or after the deadline. Check before the next ioctl. */
+		if (deadline && next_poll(deadline, false) < 0)
+			return -1;
 	}
 }
 
@@ -245,6 +319,8 @@ static int request(int fd, const struct command *cmd)
 		}
 		epoch = vm.epoch;
 	}
+	if (cmd->op == PAULI_LOG_READ)
+		return read_logs(fd, cmd, epoch);
 	if (cmd->op == PAULI_CREATE) {
 		struct pauli_create child = cmd->create;
 		child.template_id = cmd->id;

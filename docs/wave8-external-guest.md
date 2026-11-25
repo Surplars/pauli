@@ -171,11 +171,14 @@ After the HS banner the external-Linux profile forwards the first Linux VM's
 console as plain serial bytes, without a host prompt, framing or an escape
 key. The embedded bring-up profile retains the native debug monitor.
 Ordinary Linux has no cross-VM rights. Manager mode boots `manager`,
-leaves `service` stopped and grants only inspect/start/stop on that fixed
+leaves `service` stopped and grants inspect, start, stop and log on that fixed
 peer. The trusted board grants these rights to each new manager incarnation;
 old requests and old grants do not survive a cold restart. There is no
 dynamic VM pool or grant of physical devices.
 
 Use the [Linux control kit](../integrations/linux/README.md) from the
 management VM. Its kernel bridge calls the [scalar SBI ABI](management-linux.md),
-not the serial console. A second VM's output stays off the Linux terminal.
+not the serial console. Read the service's latest 4096 UART bytes with
+`paulictl logs service`. Its output stays off the physical UART unless Linux
+explicitly prints it. The same command works after a service stop or fault,
+up to the next cold restart.

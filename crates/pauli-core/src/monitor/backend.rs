@@ -8,7 +8,7 @@ use crate::{
     runtime::VmRuntime,
     vm::{State, Vm},
 };
-use pauli_control::{Backend, ChildSpec, Error, Info, VmId};
+use pauli_control::{Backend, ChildSpec, ConsoleChunk, Error, Info, VmId};
 pub struct Target<'a, A: HvArch, B: Board>(pub &'a VmRuntime<A, B>);
 impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
     fn grant_page(&self) -> Result<&'static mut pauli_control::GrantPage, Error> {
@@ -62,6 +62,16 @@ impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
     fn destroy(&mut self, vm: VmId, epoch: u32) -> core::result::Result<(), Error> {
         let slot = vm.0.checked_sub(1).ok_or(Error::NotFound)? as usize;
         self.0.manager.destroy(slot, epoch).map_err(resource_error)
+    }
+    fn console_read(&self, id: VmId, epoch: u32, cursor: u64) -> Result<ConsoleChunk, Error> {
+        let slot = id.0.checked_sub(1).ok_or(Error::NotFound)? as usize;
+        let vm = self.0.manager.vm(slot).map_err(|_| Error::NotFound)?;
+        // Cold restore resets the log and publishes its new epoch under this same lock.
+        let io = vm.devices.io.lock();
+        if epoch == 0 || vm.epoch() != epoch {
+            return Err(Error::StaleEpoch);
+        }
+        io.console.read_log(cursor)
     }
     fn input(&mut self, vm: VmId, byte: u8) -> core::result::Result<(), Error> {
         let vm = self

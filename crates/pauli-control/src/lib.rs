@@ -44,6 +44,8 @@ impl Rights {
     pub const DESTROY: Self = Self(32);
     /// Modify CPU/RAM at creation. Never implied by ordinary template cloning.
     pub const SHAPE: Self = Self(64);
+    /// Read the console history of one target epoch, including after it stops.
+    pub const LOG: Self = Self(1 << 7);
     /// Legacy operating rights. Provisioning is a separate explicit grant.
     pub const ALL: Self = Self(15);
     pub const fn disk(slot: DiskSlot) -> Self {
@@ -67,6 +69,7 @@ impl Rights {
                 "create" => Self::CREATE,
                 "destroy" => Self::DESTROY,
                 "shape" => Self::SHAPE,
+                "log" => Self::LOG,
                 word if word.len() == 5 && word.starts_with("disk") => {
                     Self::disk(DiskSlot::new(word.as_bytes()[4].checked_sub(b'0')?)?)
                 }
@@ -111,6 +114,7 @@ pub enum Operation {
     Stop,
     Console,
     Input(u8),
+    ConsoleRead(u64),
     Create(ChildSpec),
     Destroy,
 }
@@ -121,6 +125,7 @@ impl Operation {
             Self::Start => Rights::START,
             Self::Stop => Rights::STOP,
             Self::Console | Self::Input(_) => Rights::CONSOLE,
+            Self::ConsoleRead(_) => Rights::LOG,
             Self::Create(spec) => {
                 let mut required = Rights::CREATE;
                 if spec.shape.vcpus.is_some() || spec.shape.memory_mib.is_some() {
@@ -146,10 +151,17 @@ pub struct Request {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsoleChunk {
+    Bytes { data: [u8; 6], len: u8 },
+    Overrun { resume: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reply {
     pub info: Info,
     /// True only when start/stop actually changed activation state.
     pub changed: bool,
+    pub log: Option<ConsoleChunk>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,6 +203,9 @@ pub trait Backend {
     fn start(&mut self, vm: VmId) -> Result<bool, Error>;
     fn stop(&mut self, vm: VmId) -> Result<(), Error>;
     fn input(&mut self, vm: VmId, byte: u8) -> Result<(), Error>;
+    fn console_read(&self, _vm: VmId, _epoch: u32, _cursor: u64) -> Result<ConsoleChunk, Error> {
+        Err(Error::Unsupported)
+    }
     /// Optional host-only storage for the next batch of grants. Return an empty
     /// page exclusively to this service, or fail before a child is created.
     fn grant_page(&self) -> Result<&'static mut GrantPage, Error> {
@@ -231,10 +246,15 @@ impl Service {
         }
     }
 
-    fn allowed(&self, caller: Caller, vm: VmId, right: Rights) -> bool {
+    fn authorize(&self, caller: Caller, vm: VmId, right: Rights) -> Result<Option<Grant>, Error> {
         match caller {
-            Caller::Host => true,
-            Caller::Guest(source) => self.grants.allows(source, vm, right),
+            Caller::Host => Ok(None),
+            Caller::Guest(source) => self
+                .grants
+                .get(source, vm)
+                .filter(|grant| grant.rights.contains(right))
+                .map(Some)
+                .ok_or(Error::Denied),
         }
     }
 
@@ -254,8 +274,16 @@ impl Service {
         if !backend.snapshot().any(|info| info.epoch == source) {
             return Err(Error::NotFound);
         }
-        backend.info(vm)?;
-        self.grants.set(Grant { source, vm, rights }, backend)?;
+        let target_epoch = backend.info(vm)?.epoch;
+        self.grants.set(
+            Grant {
+                source,
+                vm,
+                rights,
+                target_epoch,
+            },
+            backend,
+        )?;
         Ok(())
     }
 
@@ -283,7 +311,7 @@ impl Service {
         let current = Self::sender(caller, backend).is_ok();
         backend
             .snapshot()
-            .filter(move |info| current && self.allowed(caller, info.vm, Rights::INSPECT))
+            .filter(move |info| current && self.authorize(caller, info.vm, Rights::INSPECT).is_ok())
     }
 
     pub fn execute(
@@ -294,10 +322,19 @@ impl Service {
     ) -> Result<Reply, Error> {
         // Reject before looking up the target or invoking lifecycle/device work.
         let sender = Self::sender(caller, backend)?;
-        if !self.allowed(caller, request.vm, request.operation.right()) {
-            return Err(Error::Denied);
-        }
+        let grant = self.authorize(caller, request.vm, request.operation.right())?;
         let before = backend.info(request.vm)?;
+        if matches!(request.operation, Operation::ConsoleRead(_))
+            && let Some(expired) = grant.filter(|g| g.target_epoch != before.epoch)
+        {
+            // The former reader may learn that its own handle expired. Any
+            // other guess gets the same denial, including the replacement epoch.
+            return Err(if request.epoch == expired.target_epoch {
+                Error::StaleEpoch
+            } else {
+                Error::Denied
+            });
+        }
         if request.operation != Operation::Inspect && request.epoch != before.epoch {
             return Err(Error::StaleEpoch);
         }
@@ -306,6 +343,14 @@ impl Service {
                 return self.create_child(caller, sender, request.vm, spec, backend);
             }
             Operation::Destroy => return self.destroy_child(before, backend),
+            Operation::ConsoleRead(cursor) => {
+                let log = backend.console_read(request.vm, before.epoch, cursor)?;
+                return Ok(Reply {
+                    info: before,
+                    changed: false,
+                    log: Some(log),
+                });
+            }
             Operation::Inspect | Operation::MemoryBytes => (before, false),
             Operation::Start => {
                 let result = backend.start(request.vm);
@@ -332,6 +377,10 @@ impl Service {
                 (before, false)
             }
         };
-        Ok(Reply { info, changed })
+        Ok(Reply {
+            info,
+            changed,
+            log: None,
+        })
     }
 }

@@ -21,11 +21,12 @@ _Static_assert(sizeof(struct pauli_info) == 8, "pauli_info ABI");
 _Static_assert(sizeof(struct pauli_vm) == 12, "pauli_vm ABI");
 _Static_assert(sizeof(struct pauli_memory) == 16, "pauli_memory ABI");
 _Static_assert(sizeof(struct pauli_create) == 40, "pauli_create ABI");
+_Static_assert(sizeof(struct pauli_log) == 280, "pauli_log ABI");
 
 struct exchange {
 	unsigned long op;
 	int error;
-	unsigned char in[sizeof(struct pauli_create)], out[sizeof(struct pauli_create)];
+	unsigned char in[sizeof(struct pauli_log)], out[sizeof(struct pauli_log)];
 };
 static struct exchange script[16];
 static size_t length, position;
@@ -73,34 +74,50 @@ static int fixture_sleep(clockid_t clock, int flags, const struct timespec *at, 
 	return 0;
 }
 
-static void exercise(int argc, char **argv, int error, const char *output)
+static void check_stream(FILE *stream, const void *expected, size_t len)
+{
+	unsigned char actual[512];
+	rewind(stream);
+	assert(len < sizeof(actual));
+	assert(fread(actual, 1, sizeof(actual), stream) == len && feof(stream));
+	assert(!memcmp(actual, expected, len));
+}
+
+static void exercise(int argc, char **argv, int error, const void *output, size_t len,
+		     const char *diagnostic)
 {
 	struct command cmd;
 	assert(parse_command(argc, argv, &cmd));
-	FILE *capture = tmpfile();
-	assert(capture);
+	FILE *capture = tmpfile(), *notices = tmpfile();
+	assert(capture && notices);
 	fflush(stdout);
+	fflush(stderr);
 	int saved = dup(STDOUT_FILENO);
+	int saved_err = dup(STDERR_FILENO);
 	assert(saved >= 0 && dup2(fileno(capture), STDOUT_FILENO) >= 0);
+	assert(saved_err >= 0 && dup2(fileno(notices), STDERR_FILENO) >= 0);
 	int rc = request(5, &cmd);
 	int last_errno = errno;
 	fflush(stdout);
+	fflush(stderr);
 	assert(dup2(saved, STDOUT_FILENO) >= 0);
+	assert(dup2(saved_err, STDERR_FILENO) >= 0);
 	close(saved);
+	close(saved_err);
 	assert(error ? rc == -1 && last_errno == error : rc == 0);
 	assert(position == length);
-	rewind(capture);
-	char bytes[512];
-	size_t n = fread(bytes, 1, sizeof(bytes), capture);
-	assert(n == strlen(output) && !memcmp(bytes, output, n) && feof(capture));
+	check_stream(capture, output, len);
+	check_stream(notices, diagnostic, strlen(diagnostic));
 	fclose(capture);
+	fclose(notices);
 	position = length = 0;
 }
 
-#define RUN(error, output, ...) do { \
+#define RUN_BYTES(error, bytes, size, diagnostic, ...) do { \
 	char *args[] = {"paulictl", __VA_ARGS__}; \
-	exercise(sizeof(args)/sizeof(args[0]), args, error, output); \
+	exercise(sizeof(args)/sizeof(args[0]), args, error, bytes, size, diagnostic); \
 } while (0)
+#define RUN(error, output, ...) RUN_BYTES(error, output, strlen(output), "", __VA_ARGS__)
 #define INVALID(...) do { \
 	char *args[] = {"paulictl", __VA_ARGS__}; struct command cmd; \
 	assert(!parse_command(sizeof(args)/sizeof(args[0]), args, &cmd)); \
@@ -223,6 +240,81 @@ static void stop_wait(void)
 	RUN(EACCES, "", "destroy", "2");
 }
 
+static void log_read(uint64_t cursor, const struct pauli_log *reply, int error)
+{
+	struct pauli_log in = {.id = 2, .epoch = 9, .cursor = cursor};
+	expect(PAULI_LOG_READ, &in, reply, error);
+}
+
+static void log_chunk(uint64_t cursor, const void *data, size_t len)
+{
+	struct pauli_log out = {.id = 2, .epoch = 9, .cursor = cursor + len, .len = len};
+	assert(len <= sizeof(out.data));
+	if (len)
+		memcpy(out.data, data, len);
+	log_read(cursor, &out, 0);
+}
+
+static void logs(void)
+{
+	struct pauli_vm vm = observed(2, 9, PAULI_FAULTED);
+	uint8_t bytes[PAULI_LOG_CHUNK + 4];
+	for (size_t i = 0; i < sizeof(bytes); i++)
+		bytes[i] = (uint8_t)i;
+	sleeps = 0;
+	inspection(2, &vm, 0);
+	log_chunk(0, bytes, PAULI_LOG_CHUNK);
+	log_chunk(PAULI_LOG_CHUNK, bytes + PAULI_LOG_CHUNK, 4);
+	log_chunk(sizeof(bytes), NULL, 0);
+	RUN_BYTES(0, bytes, sizeof(bytes), "", "logs", "service");
+	assert(!sleeps);
+
+	uint64_t resume = UINT64_C(4294967309);
+	struct pauli_log lost = {.id = 2, .epoch = 9, .cursor = resume, .flags = PAULI_LOG_OVERRUN};
+	const unsigned char recovered[] = {'X', 0, 255, '\n'};
+	log_chunk(4, recovered, 1);
+	log_read(5, &lost, 0);
+	log_chunk(resume, recovered + 1, 3);
+	log_chunk(resume + 3, NULL, 0);
+	RUN_BYTES(0, recovered, sizeof(recovered),
+		  "paulictl: log overrun at cursor 5, resuming at 4294967309\n",
+		  "logs", "2", "--cursor", "4", "--epoch", "9");
+	assert(!sleeps);
+
+	// Poll at EOF, stream new bytes, and stop on reincarnation without inspecting again.
+	log_chunk(0, NULL, 0);
+	log_chunk(0, bytes, 3);
+	log_read(3, NULL, EAGAIN);
+	RUN_BYTES(EAGAIN, bytes, 3, "", "logs", "service", "--follow", "--epoch", "9");
+	assert(sleeps == 1);
+	log_read(UINT64_MAX, NULL, ESTALE);
+	RUN(ESTALE, "", "logs", "2", "--epoch", "9", "--cursor", "18446744073709551615");
+	lost.epoch++;
+	log_read(0, &lost, 0);
+	RUN(ESTALE, "", "logs", "2", "--epoch", "9");
+	inspection(2, NULL, EACCES);
+	RUN(EACCES, "", "logs", "service");
+	log_read(0, NULL, EACCES);
+	RUN(EACCES, "", "logs", "2", "--epoch", "9");
+
+	sleeps = 0;
+	clock_now = (struct timespec){.tv_sec = 6, .tv_nsec = 990000000L};
+	for (int i = 0; i < 2; i++) /* No additional ioctl at the 51 ms deadline. */
+		log_chunk(0, NULL, 0);
+	RUN(ETIMEDOUT, "", "logs", "service", "--timeout-ms", "51", "--epoch", "9", "--follow");
+	assert(sleeps == 2 && clock_now.tv_sec == 7 && clock_now.tv_nsec == 41000000L);
+	log_chunk(0, bytes, 3);
+	RUN_BYTES(ETIMEDOUT, bytes, 3, "", "logs", "2", "--follow", "--epoch", "9", "--timeout-ms", "0");
+	assert(sleeps == 2);
+
+	lost.epoch = 9;
+	log_read(resume, &lost, 0); // an overrun must advance the cursor
+	RUN(EPROTO, "", "logs", "2", "--epoch", "9", "--cursor", "4294967309");
+	struct pauli_log oversized = {.id = 2, .epoch = 9, .len = 257, .cursor = 257};
+	log_read(0, &oversized, 0);
+	RUN(EPROTO, "", "logs", "2", "--epoch", "9");
+}
+
 int main(void)
 {
 	assert(target_id("service") == 2 && target_id("4294967295") == UINT32_MAX);
@@ -248,9 +340,20 @@ int main(void)
 	INVALID("create", "2", "child", "--vcpus", "0");
 	INVALID("create", "2", "child", "--disk", "0", "--disk", "1");
 	INVALID("memory", "service", "--epoch");
+	INVALID("logs", "service", "--cursor", "18446744073709551616");
+	INVALID("logs", "service", "--cursor", "-1");
+	INVALID("logs", "service", "--cursor", "0", "--cursor", "0");
+	INVALID("logs", "service", "--follow", "--follow");
+	INVALID("logs", "service", "--timeout-ms", "1");
+	INVALID("logs", "service", "--follow", "--timeout-ms", "1", "--timeout-ms", "2");
+	INVALID("logs", "service", "--wait");
+	INVALID("memory", "service", "--follow");
+	INVALID("stop", "service", "--cursor", "0");
 	legacy_and_list();
 	provision();
 	stop_wait();
+	logs();
 	puts("PASS: legacy output, visible list, epoch binding, create/disk shapes, exact memory, stop waits and no mutation retry");
+	puts("PASS: binary logs, cursor recovery, epoch changes and bounded follow");
 	return 0;
 }
