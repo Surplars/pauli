@@ -276,6 +276,17 @@ pub trait Backend {
     /// Retract only this peer's hints from a receiver's inbox. A backend that
     /// publishes hints must also notify its active subscriber of binding loss.
     fn mail_binding_lost(&self, _receiver: VmId, _epoch: u32, _peer: VmId, _peer_epoch: u32) {}
+    /// Management-owner update of one epoch-qualified LOG/STATE observation.
+    /// Removing a class retracts its pending hints and wakes its subscriber.
+    fn event_watch(
+        &self,
+        _watcher: (VmId, u32),
+        _peer: (VmId, u32),
+        _before: u64,
+        _after: u64,
+        _replaced: bool,
+    ) {
+    }
     /// Optional host-only storage for the next batch of grants. Return an empty
     /// page exclusively to this service, or fail before a child is created.
     fn grant_page(&self) -> Result<&'static mut GrantPage, Error> {
@@ -368,9 +379,19 @@ impl Service {
             vm,
             rights,
             target_epoch,
+            observed_epoch: target_epoch,
             mail_watch,
         };
         self.grants.set(grants::Entry::Vm(grant), backend)?;
+        let old_classes = match old {
+            Some(g) if g.observed_epoch == target_epoch => g.observations(),
+            Some(g) => {
+                g.change_observations(g.observations(), 0, backend);
+                0
+            }
+            None => 0,
+        };
+        grant.change_observations(old_classes, grant.observations(), backend);
         if let Some(old) =
             old.filter(|g| g.target_epoch != target_epoch || mail_watch == MailWatch::None)
         {
@@ -405,6 +426,7 @@ impl Service {
         }
         if let Some(old) = self.grants.vm_grant(source, vm) {
             self.withdraw_mail(old, backend);
+            old.change_observations(old.observations(), 0, backend);
         }
         self.grants
             .remove(|entry| entry.key() == (source, Some(vm)));
@@ -417,6 +439,9 @@ impl Service {
         // Each record represents one watcher, even without reciprocal MAIL.
         // Retain incoming rights to the terminal inbox but report this loss once.
         for grant in self.grants.vm_grants_mut() {
+            if grant.source == source {
+                grant.change_observations(grant.observations(), 0, backend);
+            }
             if grant.mail_watch != MailWatch::None
                 && (grant.source == source || grant.target_epoch == source)
             {
@@ -430,6 +455,32 @@ impl Service {
             }
         }
         self.grants.remove(|entry| entry.key().0 == source);
+    }
+
+    /// Account for the actual replacement of an epoch. Terminal LOG reads and
+    /// STATE transitions remain observable between a stop request and replacement.
+    pub fn replaced(&mut self, vm: VmId, old: u32, fresh: u32, backend: &impl Backend) {
+        if old == fresh {
+            return;
+        }
+        self.retire(old, backend);
+        for grant in self
+            .grants
+            .vm_grants_mut()
+            .filter(|g| g.vm == vm && g.observed_epoch == old)
+        {
+            grant.change_observations(grant.observations(), 0, backend);
+            grant.observed_epoch = fresh;
+            if grant.rights.contains(Rights::INSPECT) {
+                backend.event_watch(
+                    (grant.source_vm, grant.source),
+                    (vm, fresh),
+                    0,
+                    abi::EVENT_STATE,
+                    true,
+                );
+            }
+        }
     }
 
     /// Hidden VMs are omitted, not exposed as denied records. Snapshot contains
@@ -522,7 +573,7 @@ impl Service {
                 // Revoke old credentials even when activation did not succeed.
                 let after = backend.info(request.vm)?;
                 if after.epoch != before.epoch {
-                    self.retire(before.epoch, backend);
+                    self.replaced(before.vm, before.epoch, after.epoch, backend);
                 }
                 (after, result?)
             }

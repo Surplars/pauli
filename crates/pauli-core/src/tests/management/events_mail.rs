@@ -55,7 +55,7 @@ fn only_successful_mutually_granted_sends_mark_the_inbox() {
     grant(&mut s, &b, r, a, Rights::INSPECT);
     assert_eq!(events(Take), 0);
     grant(&mut s, &b, r, a, Rights::MAIL);
-    assert_eq!(events(Mask(true)), 0);
+    assert_eq!(events(Mask(EVENT_MAIL)), 0);
     assert_eq!(events(Take), 0); // Grants do not publish old messages.
     assert_eq!(
         call(&mut s, &mut b, r, a, Operation::Inspect),
@@ -69,11 +69,11 @@ fn only_successful_mutually_granted_sends_mark_the_inbox() {
             .message,
         Some(EMPTY)
     );
-    assert_eq!(events(Mask(false)), EVENT_MAIL);
+    assert_eq!(events(Mask(0)), EVENT_MAIL);
     for _ in 0..8 {
         call(&mut s, &mut b, a, r, send).unwrap();
     }
-    assert_eq!(events(Mask(true)), 0);
+    assert_eq!(events(Mask(EVENT_MAIL)), 0);
     assert_eq!(events(Take), EVENT_MAIL); // Eight enqueues coalesced while masked.
     assert_eq!(call(&mut s, &mut b, a, r, send), Err(Error::Busy));
     assert_eq!(events(Take), 0);
@@ -115,7 +115,7 @@ fn loss_of_one_binding_retracts_only_its_hints_and_wakes_an_active_watcher_once(
     grant(&mut s, &b, r, r, Rights::MAIL);
     grant(&mut s, &b, r, a, Rights::MAIL);
     grant(&mut s, &b, a, r, Rights::MAIL);
-    assert_eq!(events(Mask(true)), 0);
+    assert_eq!(events(Mask(EVENT_MAIL)), 0);
     call(&mut s, &mut b, r, r, send).unwrap();
     call(&mut s, &mut b, a, r, send).unwrap();
     grant(&mut s, &b, r, a, Rights::MAIL.union(Rights::LOG));
@@ -151,9 +151,9 @@ fn loss_of_one_binding_retracts_only_its_hints_and_wakes_an_active_watcher_once(
     );
 
     call(&mut s, &mut b, a, r, send).unwrap();
-    events(Mask(false));
+    events(Mask(0));
     s.revoke(Caller::Host, a.epoch, r.vm, &b).unwrap();
-    events(Mask(true));
+    events(Mask(EVENT_MAIL));
     assert_eq!(events(Take), 0); // Masked watcher gets neither stale MAIL nor RESCAN.
     grant(&mut s, &b, a, r, Rights::MAIL);
     s.revoke(Caller::Host, a.epoch, r.vm, &b).unwrap();
@@ -173,7 +173,7 @@ fn a_one_way_mail_watcher_alone_is_woken_on_grant_loss_or_peer_retirement() {
     let watcher = b.info(VmId(2)).unwrap();
     let receiver = f.runtime.manager.vm(1).unwrap();
     let events = |op| receiver.control_event(op, 0).unwrap();
-    events(Mask(true));
+    events(Mask(EVENT_MAIL));
 
     // Only the watcher holds MAIL. It can RECEIVE and wait with no peer sends yet.
     grant(&mut s, &b, watcher, sender, Rights::MAIL);
@@ -243,7 +243,7 @@ fn stopped_destroyed_and_reused_slot_leaves_no_notification_authority() {
     let child = b.info(child.vm).unwrap();
     grant(&mut s, &b, r, child, Rights::MAIL);
     grant(&mut s, &b, child, r, Rights::MAIL);
-    events(Mask(true));
+    events(Mask(EVENT_MAIL));
     call(&mut s, &mut b, child, r, Operation::MailSend(EMPTY)).unwrap();
     let host = |s: &mut Service, b: &mut _, op| {
         s.execute(

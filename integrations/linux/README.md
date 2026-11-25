@@ -99,14 +99,14 @@ queues two binary bytes. A full inbox or sender quota returns `EAGAIN`.
 more messages from that peer are queued. An empty inbox prints `empty=1`.
 A present zero-byte message prints `len=0` and an empty `hex=` field.
 `--raw` writes exactly the payload, so both cases produce zero output bytes.
-`--wait` polls only after a successful empty receive. The default limit is
+`--wait` waits for new mail after a successful empty receive. The default limit is
 30,000 ms. A timeout or ioctl error ends the command.
 
 Mail requires a directional `mail` grant. To send or receive with only
 that right, use `--epoch 0` to select the grant's bound peer epoch.
 Structured output then reports `epoch=0`. An omitted epoch uses INSPECT
 once. To pin a wait to one incarnation even if a host replaces the grant
-between polls, use its nonzero epoch. The stock Valence service emits UART heartbeats. A mailbox exchange
+between receives, use its nonzero epoch. The stock Valence service emits UART heartbeats. A mailbox exchange
 requires peer firmware that calls the send and receive operations.
 
 `create` requires a template grant and quota. The name is 1–16 ASCII bytes,
@@ -123,11 +123,17 @@ For create, supply the template epoch. For subsequent child operations, use
 the latest child epoch. A stale epoch, busy result or copy error ends the
 request. Inspect the target before deciding whether to issue another action.
 
-`stop --wait` issues STOP once and polls INSPECT for the same epoch until
+`stop --wait` issues STOP once and checks INSPECT for the same epoch until
 the state is `stopped` or `faulted`. The successful row shows the observed
 state and the original STOP reply's `changed` bit. An epoch change or timeout
 ends the wait with an error. The default timeout is 30,000 ms. A timeout
 does not cancel the acknowledged stop.
+
+For each of these waits, the tool queries the driver's event capabilities.
+With the wired control IRQ and support for the requested class, it arms
+the fd before checking the condition and sleeps in `ppoll` between hints.
+With an older driver, a missing IRQ or an unsupported class, it uses the
+timed checks. A permission error ends the command.
 
 Run the tool and driver tests on a 64-bit Linux host:
 

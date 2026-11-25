@@ -225,7 +225,7 @@ word is an independent atomic read. Even two equal reads of `vm_exits`
 cannot establish that mail and idle counters came from the same instant.
 Use halted captures when validating cross-field relationships.
 
-### Mail notification and guest WFI
+### Control interrupts and guest WFI
 
 An opted-in guest has a level-high control interrupt on virtual source 12.
 The guest configures its PLIC context or chooses an APLIC target and IMSIC
@@ -240,10 +240,10 @@ caller's own event state. Arguments and results are XLEN-wide scalars.
 | TAKE | `[0, 0, 0, 0, 0, 0]` | All pending reasons, cleared in the same operation |
 | MASK | `[1, mask, 0, 0, 0, 0]` | Previous mask |
 
-The initial mask is zero. Bit 0 subscribes to MAIL. Bits 1 (LOG) and
-2 (STATE) are reserved. Bit 3 (RESCAN) is a return-only reason that tells
-an existing watcher to recheck its bindings. A MAIL subscription also
-enables IRQ delivery for RESCAN. Invalid commands, mask bits or reserved
+The initial mask is zero. Bit 0 subscribes to MAIL, bit 1 to LOG and
+bit 2 to STATE. Bit 3 (RESCAN) is a return-only reason. On RESCAN, recheck
+the predicates covered by the subscription. The mask controls which hints
+can raise the wired interrupt. Invalid commands, mask bits or reserved
 arguments return `INVALID_PARAM`. A guest without the device receives
 `NOT_SUPPORTED` for a well-formed event call. If a host stop closes an
 opted-in VM before the call takes effect, the call returns `INVALID_STATE`.
@@ -261,6 +261,18 @@ Retiring an epoch or revoking a receive grant retracts its interest.
 Publication and TAKE serialize the event state and interrupt level under
 the recipient device lock followed by the interrupt-controller lock.
 Physical owner kicks happen after both locks are released.
+
+LOG requires a grant for the exact target epoch. An append marks console
+history dirty even when the host terminal FIFO is full. The monitor takes
+that flag once per harvest. Each producer tracks interested recipients by
+boot slot, so sending notifications to every eligible recipient takes at
+most four deliveries. STATE requires INSPECT and follows
+observable lifecycle and retirement changes. Neither reason identifies the
+target. A recipient with several peers rechecks its authorized predicates.
+Revocation retracts the affected hint and wakes a subscribed recipient with
+RESCAN. If several peers contributed to a coalesced class, RESCAN preserves
+the wake for other outstanding work. Cold activation clears the recipient's
+mask and pending hints.
 
 ## Bootstrap without a management OS
 

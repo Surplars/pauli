@@ -18,7 +18,9 @@ use pauli_hal::{
     device::{CompletionEvent, MmioAccess},
     sync::SpinLock,
 };
+#[cfg(feature = "guest-control")]
 mod events;
+#[cfg(feature = "guest-control")]
 use events::ControlEvents;
 /// Stable driver notification targets. Boot VMs may share a read-only disk;
 /// managed disks instead have one exclusive owner, whose VM ID need not be small.
@@ -40,13 +42,20 @@ pub struct IoState {
     pub ram: GuestRam,
     pub console: Console,
     pub(crate) mailbox: Mailbox,
+    #[cfg(feature = "guest-control")]
     control: ControlEvents,
+    #[cfg(feature = "guest-control")]
+    pub(crate) observers: super::observations::Observers,
     pub block: Option<Block>,
     pub net: Option<Net>,
     pub rtc: Rtc,
     levels: [bool; 4],
 }
 impl IoState {
+    #[cfg(feature = "guest-control")]
+    pub(crate) fn record_observations(&mut self, state: super::State) {
+        self.observers.record(self.console.take_log_dirty(), state);
+    }
     /// Block and net retain their polling bound even when their queues look empty:
     /// completions and incoming frames may originate outside this VM.
     pub(crate) fn needs_fast_idle_service(&self) -> bool {
@@ -62,6 +71,7 @@ pub struct VmDevices<I: VirtualIrqChip> {
     pub(super) irq_config: GuestIrqConfig,
     /// UART, block, net and RTC lines in the same order as IoState::levels.
     irq_sources: [u32; 4],
+    #[cfg(feature = "guest-control")]
     control_irq: Option<u32>,
     pub(super) lanes: usize,
 }
@@ -110,7 +120,10 @@ impl<I: VirtualIrqChip> VmDevices<I> {
                 ram,
                 console: Console::new((hz / 1000).max(1)),
                 mailbox: Mailbox::new(),
+                #[cfg(feature = "guest-control")]
                 control: ControlEvents::default(),
+                #[cfg(feature = "guest-control")]
+                observers: super::observations::Observers::default(),
                 block,
                 net,
                 rtc: Rtc::new(unix, now, hz),
@@ -121,6 +134,7 @@ impl<I: VirtualIrqChip> VmDevices<I> {
             bus,
             irq_config,
             irq_sources,
+            #[cfg(feature = "guest-control")]
             control_irq: config.control_events.then_some(layout.control_irq),
             lanes: usize::MAX >> (usize::BITS - u32::from(config.vcpus)),
         })
@@ -128,7 +142,11 @@ impl<I: VirtualIrqChip> VmDevices<I> {
     pub(super) fn replace_chip(&self, io: &mut IoState, chip: I, config: &VmConfig) {
         *self.irqs.lock() = IrqBank::new(chip, config);
         io.levels = [false; 4];
-        io.control = ControlEvents::default();
+        #[cfg(feature = "guest-control")]
+        {
+            io.control = ControlEvents::default();
+            io.observers = super::observations::Observers::default();
+        }
         self.wake.store(0, Ordering::Relaxed);
     }
     fn levels(&self, io: &mut IoState, exclude: usize) {
@@ -301,7 +319,10 @@ impl<I: VirtualIrqChip> VmDevices<I> {
                 }
                 value
             }
-            DeviceId::Block if access.width == 4 => io.block.as_mut().and_then(|b| b.access(offset, access.write)),
+            DeviceId::Block if access.width == 4 => io
+                .block
+                .as_mut()
+                .and_then(|b| b.access(offset, access.write)),
             DeviceId::Net => io
                 .net
                 .as_mut()
@@ -334,6 +355,7 @@ impl<I: VirtualIrqChip> VmDevices<I> {
             net.stop(link)?;
         }
         self.irqs.lock().quiesce()?;
+        #[cfg(feature = "guest-control")]
         if self.control_irq.is_some() {
             io.control = ControlEvents::default();
             io.mailbox.clear_hints();

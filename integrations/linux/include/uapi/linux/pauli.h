@@ -117,4 +117,33 @@ struct pauli_stats_owner {
 #define PAULI_STATS_HEADER	_IOR('P', 0x7a, struct pauli_stats_header)
 #define PAULI_STATS_OWNER	_IOWR('P', 0x7b, struct pauli_stats_owner)
 
+#define PAULI_EVENT_FEAT	(1U << 1) /* FID2 FEAT_EVENTS */
+#define PAULI_EVENT_DT		(1U << 0) /* Control node bound */
+#define PAULI_EVENT_READY	(1U << 1) /* Threaded IRQ and poll available */
+#define PAULI_EVENT_MAIL	(1U << 0)
+#define PAULI_EVENT_LOG		(1U << 1)
+#define PAULI_EVENT_STATE	(1U << 2)
+#define PAULI_EVENT_RESCAN	(1U << 3) /* Returned for any armed class */
+
+struct pauli_event_info {
+	__u32 features;		/* SBI feature bits */
+	__u32 supported;	/* Reasons accepted by ARM on this binding */
+	__u32 flags;
+	__u32 reserved;
+};
+
+struct pauli_event_arm {
+	__u32 mask;		/* MAIL, LOG, STATE; zero disarms this open */
+	__u32 reserved;
+};
+
+struct pauli_events {
+	__u32 reasons;		/* Changes since this open last consumed them */
+	__u32 reserved;
+};
+
+#define PAULI_EVENT_INFO	_IOR('P', 0x7c, struct pauli_event_info)
+#define PAULI_EVENT_ARM		_IOW('P', 0x7d, struct pauli_event_arm)
+#define PAULI_EVENT_READ	_IOR('P', 0x7e, struct pauli_events)
+
 #endif /* _UAPI_LINUX_PAULI_H */

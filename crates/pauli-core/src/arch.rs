@@ -33,7 +33,8 @@ pub fn cpu_targets(mask: usize, base: usize, count: usize) -> Option<usize> {
 // Transport backends announce the same ABI without importing the policy crate.
 #[cfg(feature = "guest-control")]
 pub use pauli_control::abi::{
-    EID as MANAGEMENT_EID, EVENT_MAIL, EVENTS_MASK, EVENTS_TAKE, FEAT_EVENTS, FEAT_STATS,
+    EID as MANAGEMENT_EID, EVENT_CLASSES, EVENT_MAIL, EVENTS_MASK, EVENTS_TAKE, FEAT_EVENTS,
+    FEAT_STATS,
 };
 /// # Safety
 /// All arena pointers and RAM mappings must be confined to the resulting
@@ -103,7 +104,7 @@ pub trait GuestIo {
 #[cfg(feature = "guest-control")]
 pub enum EventControl {
     Take,
-    Mask(bool),
+    Mask(u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

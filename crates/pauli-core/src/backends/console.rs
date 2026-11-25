@@ -15,6 +15,8 @@ pub struct Console {
     pub dropped: u64,
     log: [u8; LOG_CAPACITY],
     total_written: u64,
+    #[cfg(feature = "guest-control")]
+    log_dirty: bool,
     // After exhausting absolute u64 cursors, TX and the circular buffer still progress.
     overflow_next: Option<usize>,
 }
@@ -28,6 +30,8 @@ impl Console {
             dropped: 0,
             log: [0; LOG_CAPACITY],
             total_written: 0,
+            #[cfg(feature = "guest-control")]
+            log_dirty: false,
             overflow_next: None,
         }
     }
@@ -49,6 +53,11 @@ impl Console {
         }
     }
     fn push(&mut self, byte: u8) {
+        // Every emitted byte enters history, including when host TX is full.
+        #[cfg(feature = "guest-control")]
+        {
+            self.log_dirty = true;
+        }
         let index = self.total_written as usize % LOG_CAPACITY;
         if let Some(total) = self.total_written.checked_add(1) {
             self.log[index] = byte;
@@ -104,6 +113,10 @@ impl Console {
     }
     pub fn reset(&mut self, timeout: u64) {
         *self = Self::new(timeout);
+    }
+    #[cfg(feature = "guest-control")]
+    pub(crate) fn take_log_dirty(&mut self) -> bool {
+        core::mem::take(&mut self.log_dirty)
     }
 }
 

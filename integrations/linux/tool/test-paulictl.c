@@ -1,21 +1,28 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Exercise the real parser and request path with a scripted device and monotonic clock.
+#define _GNU_SOURCE
 #include <assert.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <time.h>
 
 static int fixture_ioctl(int fd, unsigned long op, void *arg);
 static int fixture_now(clockid_t clock, struct timespec *now);
 static int fixture_sleep(clockid_t clock, int flags, const struct timespec *at, struct timespec *left);
+static int fixture_ppoll(struct pollfd *fds, nfds_t count, const struct timespec *timeout,
+			 const sigset_t *sigmask);
 #define ioctl fixture_ioctl
 #define clock_gettime fixture_now
 #define clock_nanosleep fixture_sleep
+#define ppoll fixture_ppoll
 #define main paulictl_main
 #include "paulictl.c"
 #undef main
 #undef ioctl
 #undef clock_gettime
 #undef clock_nanosleep
+#undef ppoll
 
 _Static_assert(sizeof(struct pauli_info) == 8, "pauli_info ABI");
 _Static_assert(sizeof(struct pauli_vm) == 12, "pauli_vm ABI");
@@ -25,10 +32,16 @@ _Static_assert(sizeof(struct pauli_log) == 280, "pauli_log ABI");
 _Static_assert(sizeof(struct pauli_mail) == 20, "pauli_mail ABI");
 _Static_assert(sizeof(struct pauli_stats_header) == 32, "pauli_stats_header ABI");
 _Static_assert(sizeof(struct pauli_stats_owner) == 144, "pauli_stats_owner ABI");
+_Static_assert(sizeof(struct pauli_event_info) == 16, "event info ABI");
+_Static_assert(sizeof(struct pauli_event_arm) == 8, "event arm ABI");
+_Static_assert(sizeof(struct pauli_events) == 8, "event read ABI");
 
 struct exchange {
 	unsigned long op;
 	int error;
+	int64_t timeout_ms;
+	uint32_t elapsed_ms;
+	short revents;
 	unsigned char in[sizeof(struct pauli_log)], out[sizeof(struct pauli_log)];
 };
 static struct exchange script[16];
@@ -61,6 +74,36 @@ static int fixture_ioctl(int fd, unsigned long op, void *arg)
 	return 0;
 }
 
+/* ppoll occupies a step in the same script as ioctl, checking their ordering. */
+static void poll_step(int64_t timeout_ms, uint32_t elapsed_ms, short revents, int error)
+{
+	expect(0, NULL, NULL, error);
+	struct exchange *e = &script[length - 1];
+	e->timeout_ms = timeout_ms;
+	e->elapsed_ms = elapsed_ms;
+	e->revents = revents;
+}
+
+static int fixture_ppoll(struct pollfd *fds, nfds_t count, const struct timespec *timeout,
+			 const sigset_t *sigmask)
+{
+	assert(count == 1 && fds->fd == 5 && fds->events == POLLIN && !sigmask);
+	assert(position < length && !script[position].op);
+	const struct exchange *e = &script[position++];
+	if (e->timeout_ms == -1)
+		assert(!timeout);
+	else
+		assert(timeout && timeout->tv_sec == e->timeout_ms / 1000 &&
+		       timeout->tv_nsec == e->timeout_ms % 1000 * 1000000);
+	clock_now = plus_ms(clock_now, e->elapsed_ms);
+	if (e->error) {
+		errno = e->error;
+		return -1;
+	}
+	fds->revents = e->revents;
+	return !!e->revents;
+}
+
 static int fixture_now(clockid_t clock, struct timespec *now)
 {
 	assert(clock == CLOCK_MONOTONIC);
@@ -91,6 +134,14 @@ static void exercise(int argc, char **argv, int error, const void *output, size_
 {
 	struct command cmd;
 	assert(parse_command(argc, argv, &cmd));
+	/* Existing wait transcripts exercise old modules. Every wait must negotiate
+	 * before its first data or management ioctl, including on these modules. */
+	if ((cmd.wait || cmd.follow) && (!length || script[0].op != PAULI_EVENT_INFO)) {
+		assert(length < sizeof(script) / sizeof(script[0]));
+		memmove(script + 1, script, length * sizeof(script[0]));
+		length++;
+		script[0] = (struct exchange){.op = PAULI_EVENT_INFO, .error = ENOTTY};
+	}
 	FILE *capture = tmpfile(), *notices = tmpfile();
 	assert(capture && notices);
 	fflush(stdout);
@@ -485,6 +536,165 @@ static void recv_mail_tests(void)
 	RUN(EPROTO, "", "recv", "2", "--epoch", "9", "--wait");
 }
 
+static void event_info(uint32_t features, uint32_t flags, uint32_t supported)
+{
+	const struct pauli_event_info info = {.features = features, .flags = flags, .supported = supported};
+	expect(PAULI_EVENT_INFO, NULL, &info, 0);
+}
+
+static void subscribe(uint32_t mask, int error)
+{
+	event_info(PAULI_EVENT_FEAT, PAULI_EVENT_DT | PAULI_EVENT_READY,
+		   PAULI_EVENT_MAIL | PAULI_EVENT_LOG | PAULI_EVENT_STATE);
+	expect(PAULI_EVENT_ARM, &(struct pauli_event_arm){.mask = mask}, NULL, error);
+}
+
+static void consume(uint32_t reasons, int error)
+{
+	expect(PAULI_EVENT_READ, NULL, &(struct pauli_events){.reasons = reasons}, error);
+}
+
+static void active_receive(void)
+{
+	const struct pauli_mail in = {.id = 2};
+	const struct pauli_mail message = {.id = 2, .tag = 7, .flags = PAULI_MAIL_PRESENT};
+	clock_now = (struct timespec){.tv_nsec = 980000000L};
+	sleeps = 0;
+	/* EINTR and a wake with no generation leave the data ioctl untouched.
+	 * RESCAN is enough to recheck, even if this particular peer is still empty. */
+	subscribe(PAULI_EVENT_MAIL, 0);
+	expect(PAULI_MAIL_RECV, &in, &in, 0);
+	poll_step(1000, 41, 0, EINTR);
+	poll_step(959, 50, POLLIN, 0);
+	consume(0, 0);
+	poll_step(909, 100, POLLIN, 0);
+	consume(PAULI_EVENT_RESCAN, 0);
+	expect(PAULI_MAIL_RECV, &in, &in, 0);
+	poll_step(809, 700, POLLIN, 0);
+	consume(PAULI_EVENT_MAIL | PAULI_EVENT_RESCAN, 0);
+	expect(PAULI_MAIL_RECV, &in, &message, 0);
+	RUN(0, "vm=2 epoch=0 tag=7 len=0 more=0 hex=\n",
+	    "recv", "2", "--epoch", "0", "--wait", "--timeout-ms", "1000");
+
+	subscribe(PAULI_EVENT_MAIL, 0);
+	expect(PAULI_MAIL_RECV, &in, &message, 0);
+	RUN(0, "", "recv", "2", "--epoch", "0", "--wait", "--timeout-ms", "0", "--raw");
+	/* A quiet fd blocks for the entire timeout, including values above INT_MAX. */
+	subscribe(PAULI_EVENT_MAIL, 0);
+	expect(PAULI_MAIL_RECV, &in, &in, 0);
+	poll_step(UINT32_MAX, UINT32_MAX, 0, 0);
+	RUN(ETIMEDOUT, "", "recv", "2", "--epoch", "0", "--wait", "--timeout-ms", "4294967295");
+	/* A failed dequeue may already have consumed a message. */
+	const int errors[] = {EACCES, EFAULT, EINTR};
+	for (size_t i = 0; i < sizeof(errors) / sizeof(errors[0]); i++) {
+		subscribe(PAULI_EVENT_MAIL, 0);
+		expect(PAULI_MAIL_RECV, &in, &in, 0);
+		poll_step(DEFAULT_TIMEOUT_MS, 0, POLLIN, 0);
+		consume(PAULI_EVENT_MAIL, 0);
+		expect(PAULI_MAIL_RECV, &in, NULL, errors[i]);
+		RUN(errors[i], "", "recv", "2", "--epoch", "0", "--wait");
+	}
+	assert(!sleeps);
+}
+
+static void active_logs(void)
+{
+	const struct pauli_vm peer = observed(2, 9, PAULI_RUNNING);
+	const struct pauli_log lost = {.id = 2, .epoch = 9, .cursor = 6, .flags = PAULI_LOG_OVERRUN};
+	const unsigned char bytes[] = {0, 255, 'a'};
+	sleeps = 0;
+	subscribe(PAULI_EVENT_LOG, 0);
+	inspection(2, &peer, 0);
+	log_chunk(0, NULL, 0);
+	poll_step(-1, 5000, POLLIN, 0);
+	consume(PAULI_EVENT_LOG | PAULI_EVENT_RESCAN, 0);
+	log_read(0, &lost, 0);
+	log_chunk(6, bytes, sizeof(bytes));
+	log_chunk(9, NULL, 0);
+	poll_step(-1, 10000, POLLIN, 0);
+	consume(PAULI_EVENT_RESCAN, 0);
+	log_read(9, NULL, EACCES);
+	RUN_BYTES(EACCES, bytes, sizeof(bytes), "paulictl: log overrun at cursor 0, resuming at 6\n",
+		  "logs", "service", "--follow");
+	subscribe(PAULI_EVENT_LOG, 0);
+	log_chunk(0, NULL, 0);
+	poll_step(55, 55, 0, EINTR);
+	RUN(ETIMEDOUT, "", "logs", "2", "--follow", "--epoch", "9", "--timeout-ms", "55");
+	assert(!sleeps);
+}
+
+static void active_stop(void)
+{
+	const struct pauli_vm bound = {.id = 2, .epoch = 9};
+	struct pauli_vm stopping = observed(2, 9, PAULI_STOPPING);
+	struct pauli_vm terminal = observed(2, 9, PAULI_STOPPED);
+	stopping.changed = 1;
+	sleeps = 0;
+	/* Arm before the initial epoch inspection and the single STOP. */
+	subscribe(PAULI_EVENT_STATE, 0);
+	inspection(2, &stopping, 0);
+	expect(PAULI_STOP, &bound, &stopping, 0);
+	inspection(2, &stopping, 0);
+	poll_step(DEFAULT_TIMEOUT_MS, 5000, POLLIN, 0);
+	consume(PAULI_EVENT_STATE, 0);
+	inspection(2, &terminal, 0);
+	RUN(0, "vm=2 epoch=9 state=stopped vcpus=1 active=0 changed=1\n", "stop", "service", "--wait");
+	terminal.epoch++;
+	subscribe(PAULI_EVENT_STATE, 0);
+	expect(PAULI_STOP, &bound, &stopping, 0);
+	inspection(2, &stopping, 0);
+	poll_step(DEFAULT_TIMEOUT_MS, 0, POLLIN, 0);
+	consume(PAULI_EVENT_RESCAN, 0);
+	inspection(2, &terminal, 0);
+	RUN(ESTALE, "", "stop", "2", "--epoch", "9", "--wait");
+	subscribe(PAULI_EVENT_STATE, 0);
+	expect(PAULI_STOP, &bound, NULL, EINTR);
+	RUN(EINTR, "", "stop", "2", "--epoch", "9", "--wait");
+	assert(!sleeps);
+}
+
+static void negotiation_and_removal(void)
+{
+	const struct pauli_mail in = {.id = 2};
+	/* An old module, feature-less host, missing IRQ, or unsupported event
+	 * class retains the legacy timed check. */
+	for (int i = 0; i < 5; i++) {
+		switch (i) {
+		case 0: expect(PAULI_EVENT_INFO, NULL, NULL, EOPNOTSUPP); break;
+		case 1: event_info(0, 0, 0); break;
+		case 2: event_info(PAULI_EVENT_FEAT, PAULI_EVENT_DT, 0); break;
+		case 3: event_info(PAULI_EVENT_FEAT, PAULI_EVENT_DT | PAULI_EVENT_READY,
+				   PAULI_EVENT_MAIL); break;
+		case 4: subscribe(PAULI_EVENT_LOG, EOPNOTSUPP); break;
+		}
+		sleeps = 0;
+		log_chunk(0, NULL, 0);
+		RUN(ETIMEDOUT, "", "logs", "2", "--epoch", "9", "--follow", "--timeout-ms", "10");
+		assert(sleeps == 1);
+	}
+	sleeps = 0;
+	expect(PAULI_EVENT_INFO, NULL, NULL, EACCES);
+	RUN(EACCES, "", "recv", "2", "--wait");
+	subscribe(PAULI_EVENT_STATE, EPERM);
+	RUN(EPERM, "", "stop", "2", "--wait");
+	subscribe(PAULI_EVENT_MAIL, 0);
+	expect(PAULI_MAIL_RECV, &in, &in, 0);
+	poll_step(DEFAULT_TIMEOUT_MS, 1, POLLERR, 0);
+	consume(0, EACCES);
+	RUN(EACCES, "", "recv", "2", "--wait", "--epoch", "0");
+	subscribe(PAULI_EVENT_LOG, 0);
+	log_chunk(0, NULL, 0);
+	poll_step(-1, 1, POLLHUP | POLLIN, 0);
+	consume(0, ENODEV);
+	RUN(ENODEV, "", "logs", "2", "--follow", "--epoch", "9");
+	subscribe(PAULI_EVENT_LOG, 0);
+	log_chunk(0, NULL, 0);
+	poll_step(-1, 0, POLLIN, 0);
+	consume(0, EOPNOTSUPP);
+	RUN(EOPNOTSUPP, "", "logs", "2", "--follow", "--epoch", "9");
+	assert(!sleeps);
+}
+
 int main(void)
 {
 	assert(target_id("service") == 2 && target_id("4294967295") == UINT32_MAX);
@@ -546,9 +756,14 @@ int main(void)
 	logs();
 	send_mail_tests();
 	recv_mail_tests();
+	active_receive();
+	active_logs();
+	active_stop();
+	negotiation_and_removal();
 	puts("PASS: legacy output, visible list, epoch binding, create/disk shapes, exact memory, stop waits and no mutation retry");
 	puts("PASS: binary logs, cursor recovery, epoch changes and bounded follow");
 	puts("PASS: live stats, redaction, sparse owners, lossless JSON, wide totals and compatibility errors");
 	puts("PASS: tagged text/hex mail, bound and inspected epochs, raw/structured receive, bounded wait and no duplicate dequeue");
+	puts("PASS: class-specific fd waits, immutable deadlines, quiet and coalesced hints, legacy fallback and terminal errors");
 	return 0;
 }

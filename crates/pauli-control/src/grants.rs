@@ -21,8 +21,29 @@ pub(super) struct Grant {
     /// LOG and MAIL bind to this incarnation. Lifecycle authority applies
     /// to the configured resource across a cold restart.
     pub target_epoch: u32,
+    /// INSPECT follows this resource across a cold restart. LOG remains bound
+    /// to target_epoch until the host grants it for a new incarnation.
+    pub observed_epoch: u32,
     /// Maintained on the management owner so sends need no subscriber search.
     pub mail_watch: MailWatch,
+}
+impl Grant {
+    pub(super) fn observations(self) -> u64 {
+        let state = self.rights.contains(Rights::INSPECT);
+        let log = self.rights.contains(Rights::LOG) && self.target_epoch == self.observed_epoch;
+        u64::from(state) * crate::abi::EVENT_STATE | u64::from(log) * crate::abi::EVENT_LOG
+    }
+    pub(super) fn change_observations(self, before: u64, after: u64, backend: &impl Backend) {
+        if before != after {
+            backend.event_watch(
+                (self.source_vm, self.source),
+                (self.vm, self.observed_epoch),
+                before,
+                after,
+                false,
+            );
+        }
+    }
 }
 #[derive(Clone, Copy)]
 pub(super) enum Entry {

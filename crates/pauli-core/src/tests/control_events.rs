@@ -8,7 +8,7 @@ use crate::{
 use core::sync::atomic::Ordering::Acquire;
 use pauli_control::{
     MailMessage, VmId,
-    abi::{EVENT_MAIL, EVENT_RESCAN},
+    abi::{EVENT_LOG, EVENT_MAIL, EVENT_RESCAN, EVENT_STATE},
 };
 use std::sync::Barrier;
 
@@ -76,9 +76,9 @@ fn self_take_retains_mail_masked_and_never_waits_for_the_manager() {
     post(&vm, peer.epoch(), 7);
     post(&vm, peer.epoch(), 9);
     assert!(!vm.devices.irqs.lock().lines[0]);
-    assert_eq!(call(&f, 0, EventControl::Mask(true)), ok(0));
+    assert_eq!(call(&f, 0, EventControl::Mask(EVENT_MAIL)), ok(0));
     assert!(vm.devices.irqs.lock().lines[0]);
-    assert_eq!(call(&f, 0, EventControl::Mask(false)), ok(EVENT_MAIL));
+    assert_eq!(call(&f, 0, EventControl::Mask(0)), ok(EVENT_MAIL));
     assert!(!vm.devices.irqs.lock().lines[0]);
     assert_eq!(call(&f, 0, EventControl::Take), ok(EVENT_MAIL));
     assert_eq!(call(&f, 0, EventControl::Take), ok(0));
@@ -101,11 +101,11 @@ fn stop_after_guest_entry_rejects_take_and_mask_before_changing_the_latch() {
             }
         }
     }
-    for command in [EventControl::Take, EventControl::Mask(false)] {
+    for command in [EventControl::Take, EventControl::Mask(0)] {
         let f = opted(1);
         let vm = f.runtime.manager.vm(0).unwrap();
         let peer = f.runtime.manager.vm(1).unwrap();
-        assert_eq!(vm.control_event(EventControl::Mask(true), 0), Ok(0));
+        assert_eq!(vm.control_event(EventControl::Mask(EVENT_MAIL), 0), Ok(0));
         post(&vm, peer.epoch(), 19);
         let cpu = vm.cpu(0).unwrap();
         cpu.data
@@ -137,27 +137,67 @@ fn masked_rescan_is_ignored_and_subscribed_invalidation_coalesces_with_mail() {
     let peer = f.runtime.manager.vm(1).unwrap();
     let ctl = |command| vm.control_event(command, 0).unwrap();
     vm.devices
-        .invalidate_control_event(&mut vm.devices.io.lock());
+        .invalidate_control_event(&mut vm.devices.io.lock(), peer.epoch(), EVENT_MAIL);
     assert_eq!(ctl(EventControl::Take), 0);
-    assert_eq!(ctl(EventControl::Mask(true)), 0);
+    assert_eq!(ctl(EventControl::Mask(EVENT_MAIL)), 0);
     vm.devices
-        .invalidate_control_event(&mut vm.devices.io.lock());
+        .invalidate_control_event(&mut vm.devices.io.lock(), peer.epoch(), EVENT_MAIL);
     vm.devices
-        .invalidate_control_event(&mut vm.devices.io.lock());
+        .invalidate_control_event(&mut vm.devices.io.lock(), peer.epoch(), EVENT_MAIL);
     assert!(vm.devices.irqs.lock().lines[0]);
     post(&vm, peer.epoch(), 0);
     assert_eq!(ctl(EventControl::Take), EVENT_MAIL | EVENT_RESCAN);
     assert_eq!(ctl(EventControl::Take), 0);
     assert!(!vm.devices.irqs.lock().lines[0]);
     vm.devices
-        .invalidate_control_event(&mut vm.devices.io.lock());
+        .invalidate_control_event(&mut vm.devices.io.lock(), peer.epoch(), EVENT_MAIL);
     let old = vm.epoch();
     vm.host_stop();
     f.runtime.manager.service(f.runtime.board);
     f.runtime.manager.start(f.runtime.board, 0).unwrap();
     assert_ne!(vm.epoch(), old);
     assert_eq!(ctl(EventControl::Take), 0);
-    assert_eq!(ctl(EventControl::Mask(false)), 0);
+    assert_eq!(ctl(EventControl::Mask(0)), 0);
+}
+
+#[test]
+fn withdrawn_origins_and_masked_hints_wake_only_the_interested_classes() {
+    let f = opted(1);
+    let vm = f.runtime.manager.vm(0).unwrap();
+    let ctl = |command| vm.control_event(command, 0).unwrap();
+    let publish = |epoch, classes| {
+        vm.devices
+            .publish_control_event(&mut vm.devices.io.lock(), epoch, classes);
+    };
+    let withdraw = |epoch, classes| {
+        vm.devices
+            .invalidate_control_event(&mut vm.devices.io.lock(), epoch, classes);
+    };
+    let asserted = || vm.devices.irqs.lock().lines[0];
+
+    ctl(EventControl::Mask(EVENT_LOG));
+    publish(12, EVENT_STATE);
+    assert!(!asserted());
+    publish(18, EVENT_LOG);
+    assert!(asserted());
+    withdraw(18, EVENT_LOG);
+    assert_eq!(ctl(EventControl::Take), EVENT_RESCAN | EVENT_STATE);
+    assert!(!asserted());
+
+    // A class's sole outstanding source survives an unrelated withdrawal.
+    publish(12, EVENT_LOG);
+    withdraw(19, EVENT_LOG);
+    assert_eq!(ctl(EventControl::Take), EVENT_LOG | EVENT_RESCAN);
+    assert_eq!(ctl(EventControl::Mask(EVENT_MAIL)), EVENT_LOG);
+    publish(12, EVENT_LOG);
+    publish(14, EVENT_LOG);
+    withdraw(12, EVENT_LOG);
+    assert!(!asserted());
+    assert_eq!(ctl(EventControl::Mask(EVENT_LOG)), EVENT_MAIL);
+    assert!(asserted());
+    assert_eq!(ctl(EventControl::Take), EVENT_RESCAN);
+    assert_eq!(ctl(EventControl::Take), 0);
+    assert!(!asserted());
 }
 
 #[test]
@@ -186,7 +226,7 @@ fn rejected_event_kick_retries_only_the_target_owner_and_wakes_its_wfi() {
     }
     assert_eq!(secondary.run_state(), CpuState::Waiting);
     vm.devices.irqs.lock().control_lane = 1;
-    assert_eq!(vm.control_event(EventControl::Mask(true), 0), Ok(0));
+    assert_eq!(vm.control_event(EventControl::Mask(EVENT_MAIL), 0), Ok(0));
     OWNER.with(|o| o.set(0));
     KICKS.with(|k| k.set(0));
     KICKED_OWNERS.with(|k| k.set(0));
@@ -213,7 +253,7 @@ fn enqueue_racing_take_has_exactly_one_receipt_and_no_stuck_line() {
     let f = opted(1);
     let vm = f.runtime.manager.vm(0).unwrap();
     let epoch = f.runtime.manager.vm(1).unwrap().epoch();
-    vm.control_event(EventControl::Mask(true), 0).unwrap();
+    vm.control_event(EventControl::Mask(EVENT_MAIL), 0).unwrap();
     for tag in 0..32 {
         let gate = Barrier::new(2);
         let first = std::thread::scope(|s| {

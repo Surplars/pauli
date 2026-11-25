@@ -22,6 +22,28 @@ See the [UAPI header](../include/uapi/linux/pauli.h).
 | PAULI_LOG_READ | 0x77 | pauli_log (280) | Up to 256 console bytes and next cursor, or an overrun resume cursor (op 8) |
 | PAULI_MAIL_SEND | 0x78 | pauli_mail (20) | Enqueue a tagged message on a ready peer (op 9) |
 | PAULI_MAIL_RECV | 0x79 | pauli_mail (20) | Remove the oldest message from one peer (op 10) |
+| PAULI_STATS_HEADER / PAULI_STATS_OWNER | 0x7a / 0x7b | pauli_stats_header (32) / pauli_stats_owner (144) | Read live host statistics under the host stats grant |
+| PAULI_EVENT_INFO | 0x7c | pauli_event_info (16) | Discover the bound control IRQ, readiness and supported event classes |
+| PAULI_EVENT_ARM | 0x7d | pauli_event_arm (8) | Set this open file's class mask, or disarm with zero |
+| PAULI_EVENT_READ | 0x7e | pauli_events (8) | Consume pending reasons observed by this open file |
+
+The optional `openion,pauli-control` platform driver binds the wired IRQ.
+The threaded handler takes coalesced SBI events and advances four local
+generations. A ready fd reports `POLLIN` for its armed classes or RESCAN.
+`poll` and `epoll` leave the generations pending. A successful EVENT_READ
+advances the calling file's cursor, including through a duplicate fd.
+An event arriving during the user copy remains pending. Unbinding wakes
+armed fds with an error and hangup. To use a later binding, open a new fd.
+
+An older hypervisor may report FEAT_EVENTS and support only MAIL.
+Test READY and the desired bit in `supported` before arming. Without a
+control IRQ, the existing management ioctls remain available.
+
+One threaded interrupt drains at most eight TAKE replies. An occasional
+empty reply is expected. If 32 consecutive empty or fully saturated
+handler invocations occur within one second, the driver disables the IRQ
+and reports `EIO`. Unbinding and rebinding the platform device can restore
+event delivery. The other management ioctls continue to operate.
 
 Each FID 1 call carries six scalars `[1, op, id, metadata, lo, hi]`. INSPECT
 uses zero metadata. START, STOP, DESTROY and MEMORY require the target's
@@ -106,7 +128,7 @@ enforcement is enabled, have the OS builder sign with its trusted key.
 
 ## Build into Linux instead
 
-Copy this directory's `pauli.c`, `Makefile` and `Kconfig` into
+Copy this directory's `pauli.c`, `pauli-events.h`, `Makefile` and `Kconfig` into
 `drivers/misc/pauli/` of the target kernel. Copy the UAPI header into
 `include/uapi/linux/pauli.h`. Add
 `source "drivers/misc/pauli/Kconfig"` to `drivers/misc/Kconfig` and

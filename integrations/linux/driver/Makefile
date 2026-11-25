@@ -18,7 +18,7 @@ BUILD_DIR ?= ../../../target/pauli-driver
 test: $(BUILD_DIR)/test-pauli
 	"$<"
 
-$(BUILD_DIR)/test-pauli: test-pauli.c pauli.c ../include/uapi/linux/pauli.h
+$(BUILD_DIR)/test-pauli: test-pauli.c test-events.h pauli.c pauli-events.h ../include/uapi/linux/pauli.h
 	mkdir -p "$(@D)"
-	$(HOSTCC) $(HOSTCFLAGS) -std=gnu11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter -I../include "$<" -o "$@"
+	$(HOSTCC) $(HOSTCFLAGS) -std=gnu11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter -pthread -I../include "$<" -o "$@"
 endif

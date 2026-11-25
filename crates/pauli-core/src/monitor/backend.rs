@@ -15,6 +15,25 @@ impl<A: HvArch, B: Board> Target<'_, A, B> {
         let slot = id.0.checked_sub(1).ok_or(Error::NotFound)? as usize;
         self.0.manager.vm(slot).map_err(|_| Error::NotFound)
     }
+    #[cfg(feature = "guest-control")]
+    pub(super) fn publish_observations(
+        &self,
+        peer_epoch: u32,
+        batch: crate::vm::observations::Batch,
+    ) {
+        for (slot, epoch, classes) in batch.recipients() {
+            let Ok(vm) = self.0.manager.vm(slot) else {
+                continue;
+            };
+            let mut io = vm.devices.io.lock();
+            if vm.epoch() == epoch && vm.lifecycle.can_enter() {
+                vm.devices
+                    .publish_control_event(&mut io, peer_epoch, classes);
+                drop(io);
+                vm.deliver_wakes();
+            }
+        }
+    }
 }
 impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
     fn stats_read(&self, word: pauli_control::StatsWord) -> Result<u64, Error> {
@@ -124,6 +143,7 @@ impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
             },
         );
         // Full-inbox cleanup may have discarded a stale marker even on Busy.
+        #[cfg(feature = "guest-control")]
         if events {
             target_vm.devices.refresh_control_event(&mut io);
             drop(io);
@@ -145,6 +165,7 @@ impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
             return Err(Error::StaleEpoch);
         }
         let result = io.mailbox.recv(peer, peer_epoch);
+        #[cfg(feature = "guest-control")]
         if receiver.config.control_events && result.message.is_some() {
             receiver.devices.refresh_control_event(&mut io);
             drop(io);
@@ -152,6 +173,7 @@ impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
         }
         Ok(result)
     }
+    #[cfg(feature = "guest-control")]
     fn mail_binding_lost(&self, receiver: VmId, epoch: u32, peer: VmId, peer_epoch: u32) {
         let Ok(vm) = self.vm(receiver) else { return };
         if !vm.config.control_events {
@@ -163,12 +185,50 @@ impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
         }
         io.mailbox.retract_hints(peer, peer_epoch);
         if vm.lifecycle.can_enter() {
-            vm.devices.invalidate_control_event(&mut io);
+            vm.devices.invalidate_control_event(
+                &mut io,
+                peer_epoch,
+                pauli_control::abi::EVENT_MAIL,
+            );
         } else {
             vm.devices.refresh_control_event(&mut io);
         }
         drop(io);
         vm.deliver_wakes();
+    }
+    #[cfg(feature = "guest-control")]
+    fn event_watch(
+        &self,
+        (receiver, epoch): (VmId, u32),
+        (peer, peer_epoch): (VmId, u32),
+        before: u64,
+        after: u64,
+        replaced: bool,
+    ) {
+        let Ok(vm) = self.vm(receiver) else { return };
+        if !vm.config.control_events {
+            return;
+        }
+        if let Ok(subject) = self.vm(peer) {
+            let mut io = subject.devices.io.lock();
+            if subject.epoch() == peer_epoch {
+                io.record_observations(subject.lifecycle.state());
+                let current = if vm.epoch() == epoch { after } else { 0 };
+                io.observers.set(vm.slot, epoch, current, replaced);
+            }
+        }
+        // The producer lock is released, including for a self-observation.
+        // A successful destroy may already have removed the producer itself.
+        let removed = before & !after;
+        if removed != 0 {
+            let mut io = vm.devices.io.lock();
+            if vm.epoch() == epoch && vm.lifecycle.can_enter() {
+                vm.devices
+                    .invalidate_control_event(&mut io, peer_epoch, removed);
+                drop(io);
+                vm.deliver_wakes();
+            }
+        }
     }
     fn input(&mut self, vm: VmId, byte: u8) -> core::result::Result<(), Error> {
         let vm = self

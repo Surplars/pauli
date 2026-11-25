@@ -84,8 +84,21 @@ impl Monitor {
         for vm in runtime.manager.vms() {
             // Drain even unselected service VMs so their virtual TX can progress.
             let mut bytes = [0; 256];
-            for _ in 0..4 {
-                let count = vm.devices.io.lock().console.drain(&mut bytes);
+            for _page in 0..4 {
+                let mut io = vm.devices.io.lock();
+                let count = io.console.drain(&mut bytes);
+                #[cfg(feature = "guest-control")]
+                let batch = if _page == 0 && io.observers.active() {
+                    io.record_observations(vm.lifecycle.state());
+                    io.observers.take()
+                } else {
+                    None
+                };
+                drop(io);
+                #[cfg(feature = "guest-control")]
+                if let Some(batch) = batch {
+                    Target(runtime).publish_observations(vm.epoch(), batch);
+                }
                 if count == 0 {
                     break;
                 }

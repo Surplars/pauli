@@ -101,7 +101,7 @@ impl Monitor {
             let (old_epoch, previous) = vm.notice.record(epoch, state);
             if old_epoch != epoch {
                 if old_epoch != 0 {
-                    self.service.retire(old_epoch, &Target(runtime));
+                    self.service.replaced(VmId(vm.slot as u32 + 1), old_epoch, epoch, &Target(runtime));
                 }
                 self.terminal.output.begin(epoch);
             }

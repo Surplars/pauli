@@ -8,7 +8,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
 #include <string.h>
+#include <sys/epoll.h>
 
 typedef uint32_t u32;
 typedef uint64_t u64;
@@ -26,9 +29,93 @@ typedef uint64_t u64;
 #define MODULE_LICENSE(value)
 #define MODULE_DESCRIPTION(value)
 
-struct file;
+struct file { void *private_data; };
+struct inode { int unused; };
+typedef uint32_t __poll_t;
+typedef int poll_table;
+typedef int irqreturn_t;
+struct device { const char *of_node; };
+struct platform_device { struct device dev; int irq; };
+struct of_device_id { char compatible[64]; };
+struct platform_driver {
+	int (*probe)(struct platform_device *);
+	void (*remove)(struct platform_device *);
+	struct { const char *name; const struct of_device_id *of_match_table; } driver;
+};
+struct mutex { pthread_mutex_t native; };
+#define DEFINE_MUTEX(name) struct mutex name = { PTHREAD_MUTEX_INITIALIZER }
+#define mutex_init(m) assert(!pthread_mutex_init(&(m)->native, NULL))
+#define mutex_lock(m) assert(!pthread_mutex_lock(&(m)->native))
+#define mutex_unlock(m) assert(!pthread_mutex_unlock(&(m)->native))
+#define DECLARE_WAIT_QUEUE_HEAD(name) int name
+#define MODULE_DEVICE_TABLE(type, name)
+#define GFP_KERNEL 0
+#define IRQF_ONESHOT 1
+#define IRQ_HANDLED 1
+#define HZ 100
+#define time_after_eq(a, b) ((long)((a) - (b)) >= 0)
+static unsigned long jiffies;
+#define EPROBE_DEFER 517
+#define kzalloc(size, flags) calloc(1, size)
+#define kfree(ptr) free(ptr)
+static int nonseekable_open(struct inode *inode, struct file *file) { return 0; }
+static unsigned int poll_waits, wake_calls, disables, frees;
+static __poll_t last_wake;
+static void (*on_poll_wait)(void);
+static void (*on_copy)(void);
+static struct platform_driver *platform;
+static int request_irq_err;
+static irqreturn_t (*irq_thread)(int, void *);
+static void *irq_data;
+static void (*detach_action)(void *);
+static void *detach_data;
+static int of_device_is_compatible(const char *node, const char *wanted)
+{
+	return node && !strcmp(node, wanted);
+}
+static bool of_device_is_available(const char *node) { return node != NULL; }
+static int platform_driver_register(struct platform_driver *p) { assert(!platform); platform = p; return 0; }
+static void platform_driver_unregister(struct platform_driver *p) { assert(p == platform); platform = NULL; }
+static int platform_get_irq_optional(struct platform_device *p, int index) { assert(!index); return p->irq; }
+static int devm_request_threaded_irq(struct device *dev, int irq, void *hard,
+				     irqreturn_t (*thread)(int, void *), int flags,
+				     const char *name, void *data)
+{
+	assert(!hard && flags == IRQF_ONESHOT && dev == &((struct platform_device *)data)->dev);
+	if (!request_irq_err) { assert(!irq_thread); irq_thread = thread; irq_data = data; }
+	return request_irq_err;
+}
+static int devm_add_action_or_reset(struct device *dev, void (*fn)(void *), void *data)
+{
+	assert(!detach_action);
+	detach_action = fn; detach_data = data;
+	return 0;
+}
+static void unbind_events(void)
+{
+	assert(detach_action);
+	detach_action(detach_data);
+	detach_action = NULL;
+	if (irq_thread) {
+		assert(irq_data == detach_data);
+		irq_thread = NULL; frees++;
+	}
+}
+static void disable_irq_nosync(int irq) { assert(irq_thread); disables++; }
+static void poll_wait(struct file *f, int *q, poll_table *table)
+{
+	poll_waits++;
+	if (on_poll_wait) { void (*hook)(void) = on_poll_wait; on_poll_wait = NULL; hook(); }
+}
+static void wake_up_interruptible_poll(int *q, __poll_t events)
+{
+	wake_calls++; last_wake = events;
+}
 struct file_operations {
 	void *owner;
+	int (*open)(struct inode *, struct file *);
+	int (*release)(struct inode *, struct file *);
+	__poll_t (*poll)(struct file *, poll_table *);
 	long (*unlocked_ioctl)(struct file *, unsigned int, unsigned long);
 	long (*compat_ioctl)(struct file *, unsigned int, unsigned long);
 };
@@ -56,6 +143,10 @@ static struct {
 } mock;
 static struct miscdevice *registered;
 static int sbi_present = 1;
+static unsigned long hs_mask, hs_reasons, hs_supported = 7;
+static long hs_error;
+static bool repeat_reason;
+static unsigned int takes;
 
 static bool capable(int capability)
 {
@@ -75,6 +166,7 @@ static size_t copy_to_user(void *to, const void *from, size_t size)
 	++mock.writes;
 	if (mock.write_fault)
 		return size;
+	if (on_copy) { void (*hook)(void) = on_copy; on_copy = NULL; hook(); }
 	memcpy(to, from, size);
 	return 0;
 }
@@ -93,6 +185,24 @@ static struct sbiret sbi_ecall(unsigned long eid, unsigned long fid, unsigned lo
 	if (fid == 0 || fid == 2) {
 		assert(eid == 0x08004f49 && !(a0 | a1 | a2 | a3 | a4 | a5));
 		return fid == 0 ? mock.reply : mock.features;
+	}
+	if (fid == 3) {
+		assert(eid == 0x08004f49 && !(a2 | a3 | a4 | a5));
+		if (hs_error)
+			return (struct sbiret){hs_error, 0};
+		if (a0 == 1) {
+			unsigned long old = hs_mask;
+			if (a1 & ~hs_supported)
+				return (struct sbiret){SBI_ERR_INVALID_PARAM, 0};
+			hs_mask = a1;
+			return (struct sbiret){0, old};
+		}
+		assert(!a0 && !a1);
+		takes++;
+		unsigned long present = hs_reasons;
+		if (!repeat_reason)
+			hs_reasons = 0;
+		return (struct sbiret){0, present};
 	}
 	if (mock.stats_reply) {
 		assert(eid == 0x08004f49 && fid == 1 && a0 == 1 && a1 == 11);
@@ -599,6 +709,8 @@ static void optional_features(void)
 	}
 }
 
+#include "test-events.h"
+
 int main(void)
 {
 	probe();
@@ -612,6 +724,7 @@ int main(void)
 	errors_and_copy_faults();
 	stats();
 	optional_features();
+	test_events();
 	hv_exit();
 	assert(!registered);
 	puts("PASS: Pauli driver probe, ioctl ABI, SBI words and replies, log chunks, mailbox records, stats and redaction, validation, credentials and copy faults");

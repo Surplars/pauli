@@ -95,7 +95,7 @@ impl Service {
         };
         let info = backend.create(sponsor, template, spec)?;
         if let Some((source, source_vm, entry)) = child_grant {
-            *entry = Some(grants::Entry::Vm(Grant {
+            let grant = Grant {
                 source,
                 source_vm,
                 vm: info.vm,
@@ -104,8 +104,11 @@ impl Service {
                     .union(Rights::LOG)
                     .union(Rights::MAIL),
                 target_epoch: info.epoch,
+                observed_epoch: info.epoch,
                 mail_watch: MailWatch::Peer,
-            }));
+            };
+            *entry = Some(grants::Entry::Vm(grant));
+            grant.change_observations(0, grant.observations(), backend);
         }
         Ok(Reply {
             info,
@@ -124,6 +127,9 @@ impl Service {
         // Both directions matter: a newly allocated slot is not the old target,
         // even for other live managers that can inspect its replacement epoch.
         self.retire(before.epoch, backend);
+        for grant in self.grants.vm_grants_mut().filter(|g| g.vm == before.vm) {
+            grant.change_observations(grant.observations(), 0, backend);
+        }
         self.grants.remove(|entry| entry.key().1 == Some(before.vm));
         Ok(Reply {
             info: before,

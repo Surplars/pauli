@@ -249,7 +249,7 @@ configured PLIC or APLIC. An opaque tree can boot with this binding, but
 cloning it requires a canonical tree if the child needs a device removed.
 The option enables the device. The host grants the MAIL right separately
 for each direction and guest incarnation. Provisioned children start with
-the device disabled. See [mail notification and guest WFI](architecture.md#mail-notification-and-guest-wfi).
+the device disabled. See [control interrupts and guest WFI](architecture.md#control-interrupts-and-guest-wfi).
 
 ## Local smoke gate
 

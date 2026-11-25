@@ -120,14 +120,14 @@ pub fn handle_ecall_mode(
         }
         #[cfg(feature = "guest-control")]
         (eid, 3) if eid == MANAGEMENT_EID as usize => {
-            use pauli_core::arch::{EVENT_MAIL, EVENTS_MASK, EVENTS_TAKE};
+            use pauli_core::arch::{EVENT_CLASSES, EVENTS_MASK, EVENTS_TAKE};
             // The VM owner completes a valid self-only operation synchronously.
             // Leave its PC and arguments intact until the result is committed.
             if ctx.x[12..16] == [0; 4] {
                 match (ctx.x[10] as u64, ctx.x[11] as u64) {
                     (EVENTS_TAKE, 0) => return Ok(SbiAction::Events(EventControl::Take)),
-                    (EVENTS_MASK, bits) if bits & !EVENT_MAIL == 0 => {
-                        return Ok(SbiAction::Events(EventControl::Mask(bits != 0)));
+                    (EVENTS_MASK, bits) if bits & !EVENT_CLASSES == 0 => {
+                        return Ok(SbiAction::Events(EventControl::Mask(bits)));
                     }
                     _ => {}
                 }

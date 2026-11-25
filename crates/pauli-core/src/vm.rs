@@ -11,6 +11,8 @@ mod irq_bank;
 pub(crate) use image::validate_embedded;
 pub mod lifecycle;
 mod management;
+#[cfg(feature = "guest-control")]
+pub(crate) mod observations;
 pub mod slot;
 use crate::{
     arch::HvArch,

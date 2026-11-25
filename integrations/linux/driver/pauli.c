@@ -5,8 +5,15 @@
 #include <linux/capability.h>
 #include <linux/compat.h>
 #include <linux/fs.h>
+#include <linux/interrupt.h>
+#include <linux/jiffies.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
+#include <linux/poll.h>
+#include <linux/slab.h>
 #include <linux/stddef.h>
 #include <linux/uaccess.h>
 #include <asm/sbi.h>
@@ -68,6 +75,8 @@ static bool valid_id(u32 id)
 {
 	return id && id <= hv_info.max_id;
 }
+
+#include "pauli-events.h"
 
 static struct sbiret hv_call(unsigned int op, u32 id, u64 metadata, u64 lo, u64 hi)
 {
@@ -325,6 +334,12 @@ static long hv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return -EPERM;
 
 	switch (cmd) {
+	case PAULI_EVENT_INFO:
+		return hv_event_info(out);
+	case PAULI_EVENT_ARM:
+		return hv_event_arm(file, out);
+	case PAULI_EVENT_READ:
+		return hv_event_read(file, out);
 	case PAULI_INFO:
 		return copy_to_user(out, &hv_info, sizeof(hv_info)) ? -EFAULT : 0;
 	case PAULI_INSPECT:
@@ -375,6 +390,9 @@ static long hv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 static const struct file_operations hv_fops = {
 	.owner = THIS_MODULE,
+	.open = hv_open,
+	.release = hv_release,
+	.poll = hv_poll,
 	.unlocked_ioctl = hv_ioctl,
 	.compat_ioctl = compat_ptr_ioctl,
 };
@@ -389,8 +407,12 @@ static struct miscdevice hv_device = {
 static int __init hv_init(void)
 {
 	struct sbiret ret;
+	int err;
 
 	static_assert(BITS_PER_LONG == 64);
+	static_assert(sizeof(struct pauli_event_info) == 16);
+	static_assert(sizeof(struct pauli_event_arm) == 8);
+	static_assert(sizeof(struct pauli_events) == 8);
 	static_assert(sizeof(struct pauli_info) == 8);
 	static_assert(sizeof(struct pauli_vm) == 12);
 	static_assert(sizeof(struct pauli_memory) == 16);
@@ -437,12 +459,17 @@ static int __init hv_init(void)
 	stats_probe_error = hv_errno(ret.error);
 	if (!stats_probe_error && !(ret.value & PAULI_FEATURE_STATS))
 		stats_probe_error = -EOPNOTSUPP;
-	return misc_register(&hv_device);
+	hv_events_register(ret);
+	err = misc_register(&hv_device);
+	if (err)
+		hv_events_unregister();
+	return err;
 }
 
 static void __exit hv_exit(void)
 {
 	misc_deregister(&hv_device);
+	hv_events_unregister();
 }
 
 module_init(hv_init);

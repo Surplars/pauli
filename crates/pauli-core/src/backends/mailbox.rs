@@ -9,6 +9,7 @@ struct Entry {
     sender: VmId,
     epoch: u32,
     message: MailMessage,
+    #[cfg(feature = "guest-control")]
     hint: bool,
 }
 
@@ -23,6 +24,7 @@ impl Mailbox {
             entries: [Entry {
                 sender: VmId(0),
                 epoch: 0,
+                #[cfg(feature = "guest-control")]
                 hint: false,
                 message: MailMessage {
                     tag: 0,
@@ -39,7 +41,7 @@ impl Mailbox {
         sender: VmId,
         epoch: u32,
         message: MailMessage,
-        hint: bool,
+        _hint: bool,
         current: impl Fn(VmId, u32) -> bool,
     ) -> Result<(), Error> {
         if self.len == INBOX_DEPTH {
@@ -68,7 +70,8 @@ impl Mailbox {
             sender,
             epoch,
             message,
-            hint,
+            #[cfg(feature = "guest-control")]
+            hint: _hint,
         };
         self.len += 1;
         Ok(())
@@ -98,16 +101,19 @@ impl Mailbox {
         *self = Self::new();
     }
 
+    #[cfg(feature = "guest-control")]
     pub(crate) fn has_hint(&self) -> bool {
         self.entries[..self.len].iter().any(|entry| entry.hint)
     }
 
+    #[cfg(feature = "guest-control")]
     pub(crate) fn clear_hints(&mut self) {
         for entry in &mut self.entries[..self.len] {
             entry.hint = false;
         }
     }
 
+    #[cfg(feature = "guest-control")]
     pub(crate) fn retract_hints(&mut self, peer: VmId, epoch: u32) {
         for entry in &mut self.entries[..self.len] {
             if entry.sender == peer && entry.epoch == epoch {

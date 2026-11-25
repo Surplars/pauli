@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Userspace never issues SBI ecalls: the guest kernel owns the VS/HS boundary.
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -280,23 +282,54 @@ static bool before(struct timespec a, struct timespec b)
 	return a.tv_sec < b.tv_sec || (a.tv_sec == b.tv_sec && a.tv_nsec < b.tv_nsec);
 }
 
-/* Check even a busy stream's deadline; only sleep when polling for new data. */
-static int next_poll(const struct timespec *limit, bool idle)
+struct waiter {
+	struct timespec deadline;
+	bool timed;
+	uint32_t mask;
+};
+
+static int prepare_wait(int fd, const struct command *cmd, struct waiter *wait)
 {
-	struct timespec now;
-	if (!limit && !idle)
+	wait->timed = !cmd->follow || cmd->has_timeout;
+	if (wait->timed) {
+		if (clock_gettime(CLOCK_MONOTONIC, &wait->deadline) < 0)
+			return -1;
+		wait->deadline = plus_ms(wait->deadline, cmd->timeout_ms);
+	}
+	struct pauli_event_info info = {};
+	if (ioctl(fd, PAULI_EVENT_INFO, &info) < 0)
+		return errno == ENOTTY || errno == EOPNOTSUPP ? 0 : -1;
+	uint32_t mask = cmd->follow ? PAULI_EVENT_LOG :
+		(cmd->op == PAULI_MAIL_RECV ? PAULI_EVENT_MAIL : PAULI_EVENT_STATE);
+	if (!(info.features & PAULI_EVENT_FEAT) || !(info.flags & PAULI_EVENT_READY) ||
+	    !(info.supported & mask))
 		return 0;
-	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+	struct pauli_event_arm arm = {.mask = mask};
+	if (ioctl(fd, PAULI_EVENT_ARM, &arm) < 0)
+		return errno == ENOTTY || errno == EOPNOTSUPP ? 0 : -1;
+	wait->mask = mask;
+	return 0;
+}
+
+static int wait_clock(const struct waiter *wait, struct timespec *now)
+{
+	if (clock_gettime(CLOCK_MONOTONIC, now) < 0)
 		return -1;
-	if (limit && !before(now, *limit)) {
+	if (wait->timed && !before(*now, wait->deadline)) {
 		errno = ETIMEDOUT;
 		return -1;
 	}
-	if (!idle)
-		return 0;
+	return 0;
+}
+
+static int legacy_pause(const struct waiter *wait)
+{
+	struct timespec now;
+	if (wait_clock(wait, &now) < 0)
+		return -1;
 	struct timespec next = plus_ms(now, POLL_MS);
-	if (limit && before(*limit, next))
-		next = *limit;
+	if (wait->timed && before(wait->deadline, next))
+		next = wait->deadline;
 	int error;
 	do {
 		error = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
@@ -308,15 +341,57 @@ static int next_poll(const struct timespec *limit, bool idle)
 	return 0;
 }
 
-static int wait_stop(int fd, struct pauli_vm *vm, uint32_t timeout_ms)
+/* Consume the hint before the caller rechecks its predicate. A later change
+ * stays readable even if it occurs before the next ppoll. */
+static int wait_change(int fd, const struct waiter *wait)
+{
+	if (!wait->mask)
+		return legacy_pause(wait);
+	for (;;) {
+		struct timespec remaining;
+		if (wait->timed) {
+			struct timespec now;
+			if (wait_clock(wait, &now) < 0)
+				return -1;
+			remaining.tv_sec = wait->deadline.tv_sec - now.tv_sec;
+			remaining.tv_nsec = wait->deadline.tv_nsec - now.tv_nsec;
+			if (remaining.tv_nsec < 0) {
+				remaining.tv_sec--;
+				remaining.tv_nsec += 1000000000L;
+			}
+		}
+		struct pollfd pfd = {.fd = fd, .events = POLLIN};
+		int rc = ppoll(&pfd, 1, wait->timed ? &remaining : NULL, NULL);
+		if (rc < 0 && errno == EINTR)
+			continue;
+		if (rc < 0)
+			return -1;
+		if (!rc) {
+			errno = ETIMEDOUT;
+			return -1;
+		}
+		if (pfd.revents & POLLNVAL) {
+			errno = EBADF;
+			return -1;
+		}
+		if (pfd.revents & (POLLIN | POLLERR | POLLHUP)) {
+			struct pauli_events events = {};
+			if (ioctl(fd, PAULI_EVENT_READ, &events) < 0)
+				return -1;
+			if (pfd.revents & (POLLERR | POLLHUP)) {
+				errno = pfd.revents & POLLHUP ? ENODEV : EIO;
+				return -1;
+			}
+			if (events.reasons & (wait->mask | PAULI_EVENT_RESCAN))
+				return 0;
+		}
+	}
+}
+
+static int wait_stop(int fd, struct pauli_vm *vm, const struct waiter *wait)
 {
 	const uint32_t id = vm->id, epoch = vm->epoch;
 	const unsigned int changed = vm->changed;
-	struct timespec now, limit;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
-		return -1;
-	limit = plus_ms(now, timeout_ms);
 	for (;;) {
 		if (inspect(fd, id, vm) < 0)
 			return -1;
@@ -328,21 +403,17 @@ static int wait_stop(int fd, struct pauli_vm *vm, uint32_t timeout_ms)
 			vm->changed = changed;
 			return 0;
 		}
-		if (next_poll(&limit, true) < 0)
+		if (wait_change(fd, wait) < 0)
+			return -1;
+		struct timespec now;
+		if (wait->mask && wait_clock(wait, &now) < 0)
 			return -1;
 	}
 }
 
-static int read_logs(int fd, const struct command *cmd, uint32_t epoch)
+static int read_logs(int fd, const struct command *cmd, uint32_t epoch, const struct waiter *wait)
 {
 	uint64_t cursor = cmd->cursor;
-	struct timespec limit;
-	const struct timespec *deadline = cmd->has_timeout ? &limit : NULL;
-	if (deadline) {
-		if (clock_gettime(CLOCK_MONOTONIC, &limit) < 0)
-			return -1;
-		limit = plus_ms(limit, cmd->timeout_ms);
-	}
 	for (;;) {
 		struct pauli_log log = {.id = cmd->id, .epoch = epoch, .cursor = cursor};
 		if (ioctl(fd, PAULI_LOG_READ, &log) < 0)
@@ -365,10 +436,11 @@ static int read_logs(int fd, const struct command *cmd, uint32_t epoch)
 			return 0;
 		}
 		cursor = log.cursor;
-		if (!log.len && !log.flags && next_poll(deadline, true) < 0)
+		if (!log.len && !log.flags && wait_change(fd, wait) < 0)
 			return -1;
-		/* A sleep can end at or after the deadline. Check before the next ioctl. */
-		if (deadline && next_poll(deadline, false) < 0)
+		/* Check even a busy stream before issuing its next read. */
+		struct timespec now;
+		if (wait->timed && wait_clock(wait, &now) < 0)
 			return -1;
 	}
 }
@@ -394,14 +466,8 @@ static int print_mail(const struct pauli_mail *mail, bool raw)
 	return fflush(stdout);
 }
 
-static int recv_mail(int fd, const struct command *cmd, uint32_t epoch)
+static int recv_mail(int fd, const struct command *cmd, uint32_t epoch, const struct waiter *wait)
 {
-	struct timespec limit;
-	if (cmd->wait) {
-		if (clock_gettime(CLOCK_MONOTONIC, &limit) < 0)
-			return -1;
-		limit = plus_ms(limit, cmd->timeout_ms);
-	}
 	for (;;) {
 		struct pauli_mail mail = {.id = cmd->id, .epoch = epoch};
 		if (ioctl(fd, PAULI_MAIL_RECV, &mail) < 0)
@@ -424,7 +490,8 @@ static int recv_mail(int fd, const struct command *cmd, uint32_t epoch)
 			return fflush(stdout);
 		}
 		/* A successful empty dequeue can be polled. A failed dequeue may have consumed mail. */
-		if (next_poll(&limit, true) < 0 || next_poll(&limit, false) < 0)
+		struct timespec now;
+		if (wait_change(fd, wait) < 0 || wait_clock(wait, &now) < 0)
 			return -1;
 	}
 }
@@ -568,6 +635,9 @@ static int request(int fd, const struct command *cmd)
 		return 0;
 	}
 
+	struct waiter wait = {};
+	if ((cmd->wait || cmd->follow) && prepare_wait(fd, cmd, &wait) < 0)
+		return -1;
 	uint32_t epoch = cmd->epoch;
 	if (!cmd->has_epoch) {
 		if (inspect(fd, cmd->id, &vm) < 0)
@@ -579,7 +649,7 @@ static int request(int fd, const struct command *cmd)
 		epoch = vm.epoch;
 	}
 	if (cmd->op == PAULI_LOG_READ)
-		return read_logs(fd, cmd, epoch);
+		return read_logs(fd, cmd, epoch, &wait);
 	if (cmd->op == PAULI_MAIL_SEND) {
 		struct pauli_mail mail = cmd->mail;
 		mail.id = cmd->id;
@@ -587,7 +657,7 @@ static int request(int fd, const struct command *cmd)
 		return ioctl(fd, PAULI_MAIL_SEND, &mail);
 	}
 	if (cmd->op == PAULI_MAIL_RECV)
-		return recv_mail(fd, cmd, epoch);
+		return recv_mail(fd, cmd, epoch, &wait);
 	if (cmd->op == PAULI_CREATE) {
 		struct pauli_create child = cmd->create;
 		child.template_id = cmd->id;
@@ -616,7 +686,7 @@ static int request(int fd, const struct command *cmd)
 			errno = ESTALE;
 			return -1;
 		}
-		if (wait_stop(fd, &vm, cmd->timeout_ms) < 0)
+		if (wait_stop(fd, &vm, &wait) < 0)
 			return -1;
 	}
 	print_vm(&vm, true);

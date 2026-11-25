@@ -34,7 +34,8 @@ pub const EVENTS_MASK: u64 = 1;
 pub const EVENT_MAIL: u64 = 1;
 pub const EVENT_LOG: u64 = 2;
 pub const EVENT_STATE: u64 = 4;
-/// A subscribed MAIL binding expired. No peer identity or activity is disclosed.
+pub const EVENT_CLASSES: u64 = EVENT_MAIL | EVENT_LOG | EVENT_STATE;
+/// Recheck authorized predicates after a change of bindings.
 pub const EVENT_RESCAN: u64 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

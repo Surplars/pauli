@@ -87,10 +87,23 @@ explicit send by the peer. Each VM can hold sixteen messages, up to eight
 from any one sender incarnation. A stopped sender's queued messages remain
 readable in its epoch. A receiver cold restart clears its inbox.
 
-The hypervisor can also wake an opted-in guest with a wired control
-interrupt. The current Linux driver and `paulictl recv --wait` still use
-polling. Firmware using the new SBI interface can enable MAIL wakes with
-a receive grant alone. See [mail notification and guest WFI](architecture.md#mail-notification-and-guest-wfi).
+On a guest with the `openion,pauli-control` interrupt, `paulictl logs --follow`,
+`recv --wait` and `stop --wait` can sleep until LOG, MAIL or STATE changes.
+The tool negotiates support for each class and arms it before reading the
+log, receiving mail or issuing STOP. A wake causes it to check the relevant
+epoch and operation again. STOP is issued once. Removing a peer grant can
+also wake the waiter so it can observe the new permissions. Each command
+keeps its original timeout. Older drivers, older hypervisors and guests
+without the IRQ retain timed checks for unsupported classes.
+
+For an application using `poll()` or `epoll`, open `/dev/pauli` and query
+`PAULI_EVENT_INFO`. When READY and the desired class are present, set the
+mask with `PAULI_EVENT_ARM` and check the actual condition before blocking.
+After readability, call `PAULI_EVENT_READ` and recheck the condition. A
+successful read advances that open file's cursor. Separate opens observe
+the same wake independently, while `dup()` shares the cursor. The driver
+checks `CAP_SYS_ADMIN` at ioctl time.
+See [control interrupts and guest WFI](architecture.md#control-interrupts-and-guest-wfi).
 
 Cold-restarting the manager invalidates its grants. A native shutdown rejects
 queued guest creates/starts too. The hypervisor continues to own CPU, memory,

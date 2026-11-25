@@ -90,10 +90,11 @@ fn management_features_reports_protocol_only_and_requires_six_zero_arguments() {
 }
 
 #[test]
-fn direct_events_accept_only_self_take_or_mail_mask_and_commit_once() {
+fn direct_events_accept_only_self_take_or_supported_classes_and_commit_once() {
     #[cfg(feature = "guest-control")]
     use pauli_core::arch::EventControl;
-    let mut cases = std::vec![[0; 6], [1, 0, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]];
+    let mut cases = std::vec![[0; 6]];
+    cases.extend((0..=7).map(|mask| [1, mask, 0, 0, 0, 0]));
     for (word, value) in [
         (0, 2),
         (0, usize::MAX),
@@ -107,7 +108,7 @@ fn direct_events_accept_only_self_take_or_mail_mask_and_commit_once() {
         args[word] = value;
         cases.push(args);
     }
-    for reserved in [2, 4, 8, 9, usize::MAX] {
+    for reserved in [8, 9, 16, usize::MAX] {
         cases.push([1, reserved, 0, 0, 0, 0]);
     }
     for args in cases {
@@ -118,7 +119,7 @@ fn direct_events_accept_only_self_take_or_mail_mask_and_commit_once() {
         #[cfg(feature = "guest-control")]
         if let Some(command) = match args {
             [0, 0, 0, 0, 0, 0] => Some(EventControl::Take),
-            [1, mask @ (0 | 1), 0, 0, 0, 0] => Some(EventControl::Mask(mask != 0)),
+            [1, mask @ 0..=7, 0, 0, 0, 0] => Some(EventControl::Mask(mask as u64)),
             _ => None,
         } {
             assert_eq!(action, SbiAction::Events(command));
