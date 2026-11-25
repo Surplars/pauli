@@ -22,6 +22,7 @@ _Static_assert(sizeof(struct pauli_vm) == 12, "pauli_vm ABI");
 _Static_assert(sizeof(struct pauli_memory) == 16, "pauli_memory ABI");
 _Static_assert(sizeof(struct pauli_create) == 40, "pauli_create ABI");
 _Static_assert(sizeof(struct pauli_log) == 280, "pauli_log ABI");
+_Static_assert(sizeof(struct pauli_mail) == 20, "pauli_mail ABI");
 
 struct exchange {
 	unsigned long op;
@@ -315,6 +316,103 @@ static void logs(void)
 	RUN(EPROTO, "", "logs", "2", "--epoch", "9");
 }
 
+static void send_mail_tests(void)
+{
+	struct pauli_vm peer = observed(2, 9, PAULI_READY);
+	struct pauli_mail msg = {.id = 2, .epoch = 9, .tag = 42, .len = 6, .data = "ABCdef"};
+	inspection(2, &peer, 0);
+	expect(PAULI_MAIL_SEND, &msg, NULL, 0);
+	RUN(0, "", "send", "service", "--tag", "42", "ABCdef");
+
+	msg = (struct pauli_mail){.id = 2, .tag = 255, .len = 6, .data = {0, 255, 0x0a, 0xab, 0xcd, 0x80}};
+	expect(PAULI_MAIL_SEND, &msg, NULL, 0);
+	RUN(0, "", "send", "2", "--epoch", "0", "--tag", "255", "--hex", "00Ff0aaBCd80");
+	msg = (struct pauli_mail){.id = 2, .epoch = UINT32_MAX};
+	expect(PAULI_MAIL_SEND, &msg, NULL, 0);
+	RUN(0, "", "send", "2", "--epoch", "4294967295");
+	expect(PAULI_MAIL_SEND, &msg, NULL, 0);
+	RUN(0, "", "send", "2", "--hex", "", "--epoch", "4294967295");
+	expect(PAULI_MAIL_SEND, &msg, NULL, EAGAIN);
+	RUN(EAGAIN, "", "send", "2", "", "--epoch", "4294967295");
+
+	msg = (struct pauli_mail){.id = 2, .len = 5, .data = "--tag"};
+	expect(PAULI_MAIL_SEND, &msg, NULL, 0);
+	RUN(0, "", "send", "2", "--epoch", "0", "--", "--tag");
+	msg = (struct pauli_mail){.id = 2};
+	for (size_t i = 0; i < 3; i++) {
+		const int errors[] = {EFAULT, ESTALE, EACCES};
+		expect(PAULI_MAIL_SEND, &msg, NULL, errors[i]);
+		RUN(errors[i], "", "send", "2", "--epoch", "0");
+	}
+	inspection(2, NULL, EACCES);
+	RUN(EACCES, "", "send", "service", "x");
+}
+
+static void recv_mail_tests(void)
+{
+	struct pauli_vm peer = observed(2, 9, PAULI_STOPPED);
+	struct pauli_mail in = {.id = 2, .epoch = 9};
+	inspection(2, &peer, 0);
+	expect(PAULI_MAIL_RECV, &in, &in, 0);
+	RUN(0, "empty=1\n", "recv", "service");
+	expect(PAULI_MAIL_RECV, &in, &in, 0);
+	RUN(0, "", "recv", "service", "--epoch", "9", "--raw");
+
+	struct pauli_mail out = {.id = 2, .epoch = 9, .tag = 255, .len = 6,
+		.flags = PAULI_MAIL_PRESENT | PAULI_MAIL_MORE, .data = {0, 255, 0x0a, 0x7e, 0x80, 0xab}};
+	expect(PAULI_MAIL_RECV, &in, &out, 0);
+	RUN(0, "vm=2 epoch=9 tag=255 len=6 more=1 hex=00ff0a7e80ab\n", "recv", "2", "--epoch", "9");
+	expect(PAULI_MAIL_RECV, &in, &out, 0);
+	RUN_BYTES(0, out.data, out.len, "", "recv", "2", "--raw", "--epoch", "9");
+	in.epoch = out.epoch = 0;
+	out.flags = PAULI_MAIL_PRESENT;
+	sleeps = 0;
+	expect(PAULI_MAIL_RECV, &in, &in, 0);
+	expect(PAULI_MAIL_RECV, &in, &out, 0);
+	RUN(0, "vm=2 epoch=0 tag=255 len=6 more=0 hex=00ff0a7e80ab\n",
+	    "recv", "service", "--wait", "--epoch", "0");
+	assert(sleeps == 1);
+	out = (struct pauli_mail){.id = 2, .tag = 7, .flags = PAULI_MAIL_PRESENT};
+	expect(PAULI_MAIL_RECV, &in, &out, 0);
+	RUN(0, "vm=2 epoch=0 tag=7 len=0 more=0 hex=\n",
+	    "recv", "2", "--epoch", "0", "--wait", "--timeout-ms", "0");
+	expect(PAULI_MAIL_RECV, &in, &out, 0);
+	RUN(0, "", "recv", "2", "--epoch", "0", "--raw", "--wait");
+	assert(sleeps == 1);
+
+	clock_now = (struct timespec){.tv_sec = 5, .tv_nsec = 990000000L};
+	sleeps = 0;
+	for (int i = 0; i < 2; i++)
+		expect(PAULI_MAIL_RECV, &in, &in, 0);
+	RUN(ETIMEDOUT, "", "recv", "2", "--epoch", "0", "--wait", "--timeout-ms", "51");
+	assert(sleeps == 2 && clock_now.tv_sec == 6 && clock_now.tv_nsec == 41000000L);
+	expect(PAULI_MAIL_RECV, &in, &in, 0);
+	RUN(ETIMEDOUT, "", "recv", "2", "--epoch", "0", "--wait", "--timeout-ms", "0");
+	assert(sleeps == 2);
+
+	in.epoch = 9;
+	inspection(2, &peer, 0);
+	expect(PAULI_MAIL_RECV, &in, &in, 0);
+	expect(PAULI_MAIL_RECV, &in, NULL, EAGAIN);
+	RUN(EAGAIN, "", "recv", "2", "--wait");
+	const int errors[] = {ESTALE, EACCES, EFAULT, EINTR};
+	for (size_t i = 0; i < sizeof(errors) / sizeof(errors[0]); i++) {
+		expect(PAULI_MAIL_RECV, &in, NULL, errors[i]);
+		RUN(errors[i], "", "recv", "2", "--epoch", "9", "--wait");
+	}
+	// Malformed replies cannot cause a duplicate dequeue or emit a partial record.
+	expect(PAULI_MAIL_RECV, &in, &out, 0); // Wrong epoch.
+	RUN(ESTALE, "", "recv", "2", "--epoch", "9", "--wait");
+	out.epoch = 9;
+	out.len = PAULI_MAIL_MAX + 1;
+	expect(PAULI_MAIL_RECV, &in, &out, 0);
+	RUN(EPROTO, "", "recv", "2", "--epoch", "9", "--raw");
+	out = in;
+	out.flags = PAULI_MAIL_MORE;
+	expect(PAULI_MAIL_RECV, &in, &out, 0);
+	RUN(EPROTO, "", "recv", "2", "--epoch", "9", "--wait");
+}
+
 int main(void)
 {
 	assert(target_id("service") == 2 && target_id("4294967295") == UINT32_MAX);
@@ -349,11 +447,34 @@ int main(void)
 	INVALID("logs", "service", "--wait");
 	INVALID("memory", "service", "--follow");
 	INVALID("stop", "service", "--cursor", "0");
+	INVALID("send", "service", "--tag", "-1");
+	INVALID("send", "service", "--tag", "256");
+	INVALID("send", "service", "--tag", "0", "--tag", "0");
+	INVALID("send", "2", "--hex");
+	INVALID("send", "2", "--hex", "0");
+	INVALID("send", "2", "--hex", "0g");
+	INVALID("send", "2", "--hex", "00000000000000");
+	INVALID("send", "2", "--hex", "", "--hex", "");
+	INVALID("send", "2", "--hex", "", "text");
+	INVALID("send", "2", "", "--hex", "01");
+	INVALID("send", "2", "", "extra");
+	INVALID("send", "2", "toolong");
+	INVALID("send", "2", "--epoch", "0", "--epoch", "1");
+	INVALID("send", "2", "--unknown");
+	INVALID("send", "2", "--wait");
+	INVALID("recv", "2", "--timeout-ms", "4");
+	INVALID("recv", "2", "--tag", "4");
+	INVALID("recv", "2", "--raw", "--raw");
+	INVALID("recv", "2", "abc");
+	INVALID("logs", "2", "--epoch", "0");
 	legacy_and_list();
 	provision();
 	stop_wait();
 	logs();
+	send_mail_tests();
+	recv_mail_tests();
 	puts("PASS: legacy output, visible list, epoch binding, create/disk shapes, exact memory, stop waits and no mutation retry");
 	puts("PASS: binary logs, cursor recovery, epoch changes and bounded follow");
+	puts("PASS: tagged text/hex mail, bound and inspected epochs, raw/structured receive, bounded wait and no duplicate dequeue");
 	return 0;
 }

@@ -110,6 +110,7 @@ fn shaped_wire_keeps_legacy_words_canonical_and_never_rounds_memory_replies() {
                 info,
                 changed: false,
                 log: None,
+                mail: None,
             })
         ),
         abi::Return {
@@ -183,6 +184,7 @@ fn replies_and_rights() {
             },
             changed: true,
             log: None,
+            mail: None,
         }));
         assert_eq!(reply.error, 0);
         assert_eq!(reply.value as u32, u32::MAX);

@@ -10,7 +10,7 @@ impl Monitor {
     ) -> Result<()> {
         match command {
             Command::Empty => {}
-            Command::Help => self.terminal.output.host(format_args!("vm list/status [name]; vm capacity; vm disks\nvm quota <manager> [<children> <vcpus> <MiB>|clear]\nvm create <template> <name> [--vcpus N] [--memory-mib N] [--disk N]; vm destroy <name>\nvm start <name> [--attach]\nvm attach/stop <name>; vm detach\nvm grant <source> <target> <inspect,start,stop,console,log,create,shape,diskN,destroy|all>\nvm revoke <source> <target>; shutdown\nCtrl+] detaches without stopping the VM\n")),
+            Command::Help => self.terminal.output.host(format_args!("vm list/status [name]; vm capacity; vm disks\nvm quota <manager> [<children> <vcpus> <MiB>|clear]\nvm create <template> <name> [--vcpus N] [--memory-mib N] [--disk N]; vm destroy <name>\nvm start <name> [--attach]\nvm attach/stop <name>; vm detach\nvm grant <source> <target> <inspect,start,stop,console,log,mail,create,shape,diskN,destroy|all>\nvm revoke <source> <target>; shutdown\nCtrl+] detaches without stopping the VM\n")),
             Command::Disks => self.disks(runtime),
             Command::Capacity => {
                 self.terminal.output.host(format_args!(
@@ -106,25 +106,8 @@ impl Monitor {
                 self.terminal.output.begin(epoch);
             }
             #[cfg(feature = "guest-control")]
-            if state == State::Ready
-                && (old_epoch != epoch || previous != Some(State::Ready))
-                && let Some(service) = runtime.board.boot_service_for(vm.slot)
-            {
-                // Bind fresh authority, not old tickets, before the RPC pump.
-                // An unchanged epoch is never re-granted on a normal poll.
-                let rights = pauli_control::Rights::INSPECT
-                    .union(pauli_control::Rights::START)
-                    .union(pauli_control::Rights::STOP)
-                    .union(pauli_control::Rights::LOG);
-                if let Err(error) = self.service.grant(
-                    Caller::Host,
-                    epoch,
-                    VmId(service as u32 + 1),
-                    rights,
-                    &Target(runtime),
-                ) {
-                    pauli_hal::hv_error!("boot service grant VM {}: {}", vm.slot + 1, error.message());
-                }
+            if state == State::Ready && (old_epoch != epoch || previous != Some(State::Ready)) {
+                self.boot_grants(runtime, vm.slot);
             }
             if previous != Some(state) && state != State::Ready {
                 if previous == Some(State::Ready) {
@@ -168,5 +151,59 @@ impl Monitor {
             self.terminal.detach();
         }
         ready
+    }
+
+    #[cfg(feature = "guest-control")]
+    fn boot_grants<A: HvArch, B: Board>(&mut self, runtime: &VmRuntime<A, B>, ready: usize) {
+        use pauli_control::Rights;
+
+        let boot = runtime.manager.config.count();
+        if ready >= boot {
+            return;
+        }
+        let mut grant = |source: &crate::vm::Vm<A>, target: usize, rights| {
+            if let Err(error) = self.service.grant(
+                Caller::Host,
+                source.epoch(),
+                VmId(target as u32 + 1),
+                rights,
+                &Target(runtime),
+            ) {
+                pauli_hal::hv_error!(
+                    "boot service grant VM {}: {}",
+                    source.slot + 1,
+                    error.message()
+                );
+            }
+        };
+        // Only boot-VM Ready edges bind a pair. Repeated polls preserve local
+        // revocation, and a service restart cannot refresh its manager's LOG grant.
+        for manager_slot in 0..boot {
+            let Some(service_slot) = runtime.board.boot_service_for(manager_slot) else {
+                continue;
+            };
+            if ready != manager_slot && ready != service_slot {
+                continue;
+            }
+            let Ok(manager) = runtime.manager.vm(manager_slot) else {
+                continue;
+            };
+            if !manager.lifecycle.can_enter() {
+                continue;
+            }
+            if ready == manager_slot {
+                let rights = Rights::INSPECT
+                    .union(Rights::START)
+                    .union(Rights::STOP)
+                    .union(Rights::LOG)
+                    .union(Rights::MAIL);
+                grant(&manager, service_slot, rights);
+            }
+            if let Ok(service) = runtime.manager.vm(service_slot)
+                && service.lifecycle.can_enter()
+            {
+                grant(&service, manager_slot, Rights::MAIL);
+            }
+        }
     }
 }

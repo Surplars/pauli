@@ -199,6 +199,7 @@ impl<A: HvArch> Vm<A> {
             // Publish the new epoch under this I/O lock so a log reader cannot see
             // reset history under the old epoch, or previous bytes under the new one.
             io.console.reset((hz / 1000).max(1));
+            io.mailbox.reset();
             io.rtc = crate::backends::rtc::Rtc::new(unix, now, hz);
             self.devices.replace_chip(&mut io, chip, &self.config);
             self.epoch.store(epoch, Ordering::Release);

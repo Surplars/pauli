@@ -46,6 +46,8 @@ impl Rights {
     pub const SHAPE: Self = Self(64);
     /// Read the console history of one target epoch, including after it stops.
     pub const LOG: Self = Self(1 << 7);
+    /// Exchange copied messages with a specific peer incarnation.
+    pub const MAIL: Self = Self(1 << 12);
     /// Legacy operating rights. Provisioning is a separate explicit grant.
     pub const ALL: Self = Self(15);
     pub const fn disk(slot: DiskSlot) -> Self {
@@ -70,6 +72,7 @@ impl Rights {
                 "destroy" => Self::DESTROY,
                 "shape" => Self::SHAPE,
                 "log" => Self::LOG,
+                "mail" => Self::MAIL,
                 word if word.len() == 5 && word.starts_with("disk") => {
                     Self::disk(DiskSlot::new(word.as_bytes()[4].checked_sub(b'0')?)?)
                 }
@@ -115,6 +118,8 @@ pub enum Operation {
     Console,
     Input(u8),
     ConsoleRead(u64),
+    MailSend(MailMessage),
+    MailRecv,
     Create(ChildSpec),
     Destroy,
 }
@@ -126,6 +131,7 @@ impl Operation {
             Self::Stop => Rights::STOP,
             Self::Console | Self::Input(_) => Rights::CONSOLE,
             Self::ConsoleRead(_) => Rights::LOG,
+            Self::MailSend(_) | Self::MailRecv => Rights::MAIL,
             Self::Create(spec) => {
                 let mut required = Rights::CREATE;
                 if spec.shape.vcpus.is_some() || spec.shape.memory_mib.is_some() {
@@ -144,8 +150,8 @@ impl Operation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Request {
     pub vm: VmId,
-    /// Inspect discovers the current epoch. Every mutation/console operation
-    /// must echo it, preventing delayed requests from reaching a cold restart.
+    /// Inspect discovers the epoch. Mail may use zero to select the granted
+    /// peer incarnation. All other operations must echo the current epoch.
     pub epoch: u32,
     pub operation: Operation,
 }
@@ -157,11 +163,33 @@ pub enum ConsoleChunk {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MailMessage {
+    pub tag: u8,
+    pub len: u8,
+    pub data: [u8; 6],
+}
+impl MailMessage {
+    fn canonical(self) -> bool {
+        self.data
+            .get(usize::from(self.len)..)
+            .is_some_and(|padding| padding.iter().all(|&b| b == 0))
+    }
+}
+
+/// A zero-length message still occupies one entry and is returned as Some.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MailChunk {
+    pub message: Option<MailMessage>,
+    pub more: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reply {
     pub info: Info,
     /// True only when start/stop actually changed activation state.
     pub changed: bool,
     pub log: Option<ConsoleChunk>,
+    pub mail: Option<MailChunk>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,6 +232,25 @@ pub trait Backend {
     fn stop(&mut self, vm: VmId) -> Result<(), Error>;
     fn input(&mut self, vm: VmId, byte: u8) -> Result<(), Error>;
     fn console_read(&self, _vm: VmId, _epoch: u32, _cursor: u64) -> Result<ConsoleChunk, Error> {
+        Err(Error::Unsupported)
+    }
+    fn mail_send(
+        &self,
+        _sender: VmId,
+        _sender_epoch: u32,
+        _target: VmId,
+        _target_epoch: u32,
+        _message: MailMessage,
+    ) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+    fn mail_recv(
+        &self,
+        _receiver: VmId,
+        _receiver_epoch: u32,
+        _peer: VmId,
+        _peer_epoch: u32,
+    ) -> Result<MailChunk, Error> {
         Err(Error::Unsupported)
     }
     /// Optional host-only storage for the next batch of grants. Return an empty
@@ -322,22 +369,33 @@ impl Service {
     ) -> Result<Reply, Error> {
         // Reject before looking up the target or invoking lifecycle/device work.
         let sender = Self::sender(caller, backend)?;
-        let grant = self.authorize(caller, request.vm, request.operation.right())?;
+        let right = request.operation.right();
+        let grant = self.authorize(caller, request.vm, right)?;
+        if right == Rights::MAIL && caller == Caller::Host {
+            return Err(Error::Unsupported);
+        }
         let before = backend.info(request.vm)?;
-        if matches!(request.operation, Operation::ConsoleRead(_))
+        let use_granted_epoch = right == Rights::MAIL && request.epoch == 0;
+        if (right == Rights::MAIL || right == Rights::LOG)
             && let Some(expired) = grant.filter(|g| g.target_epoch != before.epoch)
         {
             // The former reader may learn that its own handle expired. Any
             // other guess gets the same denial, including the replacement epoch.
-            return Err(if request.epoch == expired.target_epoch {
-                Error::StaleEpoch
-            } else {
-                Error::Denied
-            });
+            return Err(
+                if use_granted_epoch || request.epoch == expired.target_epoch {
+                    Error::StaleEpoch
+                } else {
+                    Error::Denied
+                },
+            );
         }
-        if request.operation != Operation::Inspect && request.epoch != before.epoch {
+        if request.operation != Operation::Inspect
+            && !use_granted_epoch
+            && request.epoch != before.epoch
+        {
             return Err(Error::StaleEpoch);
         }
+        let mut mail = None;
         let (info, changed) = match request.operation {
             Operation::Create(spec) => {
                 return self.create_child(caller, sender, request.vm, spec, backend);
@@ -349,7 +407,22 @@ impl Service {
                     info: before,
                     changed: false,
                     log: Some(log),
+                    mail: None,
                 });
+            }
+            Operation::MailSend(_) | Operation::MailRecv => {
+                // Both endpoint identities come from trusted runtime metadata.
+                let (source, grant) = sender.zip(grant).ok_or(Error::Unsupported)?;
+                if let Operation::MailSend(message) = request.operation {
+                    if !message.canonical() {
+                        return Err(Error::Invalid);
+                    }
+                    backend.mail_send(source, grant.source, before.vm, before.epoch, message)?;
+                } else {
+                    mail =
+                        Some(backend.mail_recv(source, grant.source, before.vm, before.epoch)?);
+                }
+                (before, false)
             }
             Operation::Inspect | Operation::MemoryBytes => (before, false),
             Operation::Start => {
@@ -381,6 +454,7 @@ impl Service {
             info,
             changed,
             log: None,
+            mail,
         })
     }
 }

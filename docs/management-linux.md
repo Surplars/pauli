@@ -70,6 +70,22 @@ manager profile supplies both rights for the fixed service at manager boot.
 Each VM retains its latest 4096 console bytes. A target cold restart clears
 that history and requires fresh log authorization for the new epoch.
 
+To exchange small records between guests, grant each caller `mail` on its
+peer. On QEMU, a host grant replaces the existing rights, so include any
+rights the application still needs. For example:
+
+```text
+hv> vm grant manager linux inspect,mail
+hv> vm grant linux manager mail
+```
+
+With both guests ready, the manager can run `paulictl send 2 --tag 7 --hex 00ff`.
+The Linux peer can run `paulictl recv 1 --epoch 0 --wait --timeout-ms 1000`
+with its mail-only grant. This pops one message. A reply requires an
+explicit send by the peer. Each VM can hold sixteen messages, up to eight
+from any one sender incarnation. A stopped sender's queued messages remain
+readable in its epoch. A receiver cold restart clears its inbox.
+
 Cold-restarting the manager invalidates its grants. A native shutdown rejects
 queued guest creates/starts too. The hypervisor continues to own CPU, memory,
 interrupts and final retirement. See [the scalar ABI and permissions](vm-config.md).

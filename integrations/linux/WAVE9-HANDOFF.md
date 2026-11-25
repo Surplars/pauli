@@ -47,3 +47,11 @@ should still give Linux login but never peer control rights. For the new
 kernel build use `source/README.md` and `source/driver/README.md`; keep the
 existing Valence board patches/config when updating its upstream base.
 No userspace syscall, serial command, or KVM device substitutes for this driver.
+
+For firmware that implements mailbox opcodes 9 and 10, install the matching
+driver and CLI with ioctls 0x78 and 0x79. After starting the service, send a
+binary request with `paulictl send service --tag 7 --hex 00ff`. If the service
+implements a reply, receive it with `paulictl recv service --wait --timeout-ms 1000`.
+The service's reverse grant contains only `mail`; its SBI calls can use
+manager ID 1 and epoch zero. The stock heartbeat firmware emits console bytes.
+Use the log command above to check that payload.

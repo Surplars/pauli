@@ -34,7 +34,7 @@ protocol on the serial port and no dependency on KVM, a network or a daemon.
 ## Acceptance on a management boot
 
 Run as root inside Debian. There is no `hv>` login or serial escape to grant
-rights. The native manager profile grants VM 1 inspect, start, stop and log
+rights. The native manager profile grants VM 1 inspect, start, stop, log and mail
 access to its declared service VM (ID 2). Ordinary Linux has no cross-VM rights.
 
 ```sh
@@ -63,6 +63,8 @@ paulictl start ID [--epoch E]
 paulictl stop ID [--epoch E] [--wait [--timeout-ms MS]]
 paulictl memory ID [--epoch E]
 paulictl logs ID [--epoch E] [--cursor N] [--follow [--timeout-ms MS]]
+paulictl send ID [--epoch E] [--tag N] [--hex HEX | TEXT]
+paulictl recv ID [--epoch E] [--wait [--timeout-ms MS]] [--raw]
 paulictl create TEMPLATE NAME [--epoch E] [--vcpus N] [--memory-mib M] [--disk SLOT]
 paulictl destroy ID [--epoch E]
 ```
@@ -85,6 +87,27 @@ Reading requires the separate `log` grant. A reader with only `log` must
 supply `--epoch` because automatic epoch discovery uses `inspect`. A stopped
 or faulted target keeps its log. Cold restart clears it and expires access
 to that target's log. First activation uses the epoch reported at creation.
+
+`send` queues one tagged message on a ready peer. The tag defaults to zero
+and ranges from 0 to 255. Supply up to six text bytes, or use `--hex` with
+up to twelve hex digits in pairs. An omitted payload sends a zero-byte
+message. Success is silent. For example, `paulictl send service --tag 7 --hex 00ff`
+queues two binary bytes. A full inbox or sender quota returns `EAGAIN`.
+
+`recv` removes the oldest message from the named peer. A result such as
+`vm=2 epoch=1 tag=7 len=2 more=0 hex=00ff` reports the tag and whether
+more messages from that peer are queued. An empty inbox prints `empty=1`.
+A present zero-byte message prints `len=0` and an empty `hex=` field.
+`--raw` writes exactly the payload, so both cases produce zero output bytes.
+`--wait` polls only after a successful empty receive. The default limit is
+30,000 ms. A timeout or ioctl error ends the command.
+
+Mail requires a directional `mail` grant. To send or receive with only
+that right, use `--epoch 0` to select the grant's bound peer epoch.
+Structured output then reports `epoch=0`. An omitted epoch uses INSPECT
+once. To pin a wait to one incarnation even if a host replaces the grant
+between polls, use its nonzero epoch. The stock Valence service emits UART heartbeats. A mailbox exchange
+requires peer firmware that calls the send and receive operations.
 
 `create` requires a template grant and quota. The name is 1–16 ASCII bytes,
 starting with a letter and continuing with letters, digits, underscores or

@@ -62,7 +62,8 @@ pub trait Board: Send + Sync + 'static {
     }
     fn load_boot_config(&self) -> Result<&'static BootConfig>;
     /// Optional native boot policy: this immutable manager slot may inspect,
-    /// start and stop one immutable service slot. Both indices are zero-based.
+    /// start, stop, read logs and exchange mail with an immutable service slot.
+    /// The service receives only mail authority back. Both indices are zero-based.
     /// No guest-provided name, DTB or RPC can select the grantee or its target.
     fn boot_service_for(&self, _manager_slot: usize) -> Option<usize> {
         None

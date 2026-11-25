@@ -171,10 +171,12 @@ After the HS banner the external-Linux profile forwards the first Linux VM's
 console as plain serial bytes, without a host prompt, framing or an escape
 key. The embedded bring-up profile retains the native debug monitor.
 Ordinary Linux has no cross-VM rights. Manager mode boots `manager`,
-leaves `service` stopped and grants inspect, start, stop and log on that fixed
-peer. The trusted board grants these rights to each new manager incarnation;
-old requests and old grants do not survive a cold restart. There is no
-dynamic VM pool or grant of physical devices.
+leaves `service` stopped and grants inspect, start, stop, log and mail on that fixed
+peer. When both guests are ready the service receives only mail on the
+manager. Log and mailbox access bind both incarnations. On service cold restart, the
+board renews the service's outgoing mail grant when the manager is ready.
+The manager receives its own boot grant when the manager enters Ready.
+This profile uses fixed VMs and virtual devices.
 
 Use the [Linux control kit](../integrations/linux/README.md) from the
 management VM. Its kernel bridge calls the [scalar SBI ABI](management-linux.md),
@@ -182,3 +184,8 @@ not the serial console. Read the service's latest 4096 UART bytes with
 `paulictl logs service`. Its output stays off the physical UART unless Linux
 explicitly prints it. The same command works after a service stop or fault,
 up to the next cold restart.
+
+A service payload that implements scalar operations 9 and 10 can exchange
+tagged records of up to six bytes with the manager. Use `paulictl send service`
+and `paulictl recv service` on Linux. In the service, peer ID 1 and epoch zero
+use its mail-only grant. The supplied heartbeat firmware continues to use UART.

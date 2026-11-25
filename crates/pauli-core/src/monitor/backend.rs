@@ -8,8 +8,14 @@ use crate::{
     runtime::VmRuntime,
     vm::{State, Vm},
 };
-use pauli_control::{Backend, ChildSpec, ConsoleChunk, Error, Info, VmId};
+use pauli_control::{Backend, ChildSpec, ConsoleChunk, Error, Info, MailChunk, MailMessage, VmId};
 pub struct Target<'a, A: HvArch, B: Board>(pub &'a VmRuntime<A, B>);
+impl<A: HvArch, B: Board> Target<'_, A, B> {
+    fn vm(&self, id: VmId) -> Result<impl core::ops::Deref<Target = Vm<A>> + '_, Error> {
+        let slot = id.0.checked_sub(1).ok_or(Error::NotFound)? as usize;
+        self.0.manager.vm(slot).map_err(|_| Error::NotFound)
+    }
+}
 impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
     fn grant_page(&self) -> Result<&'static mut pauli_control::GrantPage, Error> {
         let pool = self.0.board.domain_pool().ok_or(Error::NoSpace)?;
@@ -22,8 +28,7 @@ impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
         self.0.manager.vms().map(|vm| info(&vm))
     }
     fn info(&self, vm: VmId) -> core::result::Result<Info, Error> {
-        let index = vm.0.checked_sub(1).ok_or(Error::NotFound)? as usize;
-        let vm = self.0.manager.vm(index).map_err(|_| Error::NotFound)?;
+        let vm = self.vm(vm)?;
         Ok(info(&vm))
     }
     fn start(&mut self, vm: VmId) -> core::result::Result<bool, Error> {
@@ -64,14 +69,51 @@ impl<A: HvArch, B: Board> Backend for Target<'_, A, B> {
         self.0.manager.destroy(slot, epoch).map_err(resource_error)
     }
     fn console_read(&self, id: VmId, epoch: u32, cursor: u64) -> Result<ConsoleChunk, Error> {
-        let slot = id.0.checked_sub(1).ok_or(Error::NotFound)? as usize;
-        let vm = self.0.manager.vm(slot).map_err(|_| Error::NotFound)?;
+        let vm = self.vm(id)?;
         // Cold restore resets the log and publishes its new epoch under this same lock.
         let io = vm.devices.io.lock();
         if epoch == 0 || vm.epoch() != epoch {
             return Err(Error::StaleEpoch);
         }
         io.console.read_log(cursor)
+    }
+    fn mail_send(
+        &self,
+        sender: VmId,
+        source_epoch: u32,
+        target: VmId,
+        target_epoch: u32,
+        message: MailMessage,
+    ) -> Result<(), Error> {
+        let sender_vm = self.vm(sender)?;
+        let target_vm = self.vm(target)?;
+        let mut io = target_vm.devices.io.lock();
+        if sender_vm.epoch() != source_epoch || target_vm.epoch() != target_epoch {
+            return Err(Error::StaleEpoch);
+        }
+        if !target_vm.lifecycle.can_enter() {
+            return Err(Error::NotActive);
+        }
+        io.mailbox.send(sender, source_epoch, message, |id, epoch| {
+            // Only pins and epoch loads, no other VM's I/O lock. The manager is
+            // the sole writer of the directory and cold epochs for this RPC.
+            self.vm(id).is_ok_and(|vm| vm.epoch() == epoch)
+        })
+    }
+    fn mail_recv(
+        &self,
+        receiver: VmId,
+        receiver_epoch: u32,
+        peer: VmId,
+        peer_epoch: u32,
+    ) -> Result<MailChunk, Error> {
+        let receiver = self.vm(receiver)?;
+        let peer_vm = self.vm(peer)?;
+        let mut io = receiver.devices.io.lock();
+        if receiver.epoch() != receiver_epoch || peer_vm.epoch() != peer_epoch {
+            return Err(Error::StaleEpoch);
+        }
+        Ok(io.mailbox.recv(peer, peer_epoch))
     }
     fn input(&mut self, vm: VmId, byte: u8) -> core::result::Result<(), Error> {
         let vm = self

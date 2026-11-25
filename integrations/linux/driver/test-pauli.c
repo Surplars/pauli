@@ -121,6 +121,7 @@ static_assert(PAULI_START == 0xc00c5072U && PAULI_STOP == 0xc00c5073U);
 static_assert(PAULI_DESTROY == 0xc00c5074U && PAULI_CREATE == 0xc0285075U);
 static_assert(PAULI_MEMORY == 0xc0105076U);
 static_assert(PAULI_LOG_READ == 0xc1185077U && sizeof(struct pauli_log) == 280);
+static_assert(PAULI_MAIL_SEND == 0x40145078U && PAULI_MAIL_RECV == 0xc0145079U);
 static_assert(sizeof(struct pauli_info) == 8 && sizeof(struct pauli_vm) == 12);
 static_assert(offsetof(struct pauli_vm, changed) == 11);
 static_assert(sizeof(struct pauli_create) == 40 && offsetof(struct pauli_create, epoch) == 4);
@@ -164,7 +165,8 @@ static void probe(void)
 static void permissions_and_info(void)
 {
 	const unsigned int cmds[] = {PAULI_INFO, PAULI_INSPECT, PAULI_START, PAULI_STOP,
-				     PAULI_DESTROY, PAULI_CREATE, PAULI_MEMORY, PAULI_LOG_READ};
+				     PAULI_DESTROY, PAULI_CREATE, PAULI_MEMORY, PAULI_LOG_READ,
+				     PAULI_MAIL_SEND, PAULI_MAIL_RECV};
 	struct pauli_info info;
 	for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); ++i) {
 		assert(call(cmds[i], NULL) == -EPERM);
@@ -360,6 +362,74 @@ static void logs(void)
 	assert(call(PAULI_LOG_READ, &log) == -EIO && !mock.writes);
 	mock.reply.value = 0;
 }
+static void mail(void)
+{
+	const u64 payload = 0xfe00dcba9800ULL;
+	const unsigned char bytes[] = {0x00, 0x98, 0xba, 0xdc, 0x00, 0xfe};
+	const u64 malformed[] = {1, 1ULL << 52, 1ULL << 53, 1ULL << 61,
+		1ULL << 63 | 1ULL << 51, 7ULL << 48 | 1ULL << 51,
+		1ULL << 51 | 1, 1ULL << 48 | 1ULL << 51 | 0x100};
+	const unsigned int cmds[] = {PAULI_MAIL_SEND, PAULI_MAIL_RECV};
+	struct pauli_mail m;
+
+	for (unsigned int len = 0; len <= PAULI_MAIL_MAX; len++) {
+		u32 epoch = len & 1 ? 0 : 0xfedcba98U;
+		unsigned int tag = len ? 255 : 0;
+		u64 lo = payload & ((1ULL << (8 * len)) - 1);
+		m = (struct pauli_mail){.id = 8, .epoch = epoch, .len = len, .tag = tag};
+		memcpy(m.data, bytes, len);
+		mock.reply.value = 0;
+		assert(call(PAULI_MAIL_SEND, &m) == 0 && !mock.writes);
+		check_wire(9, 8, epoch | (u64)len << 32 | (u64)tag << 40, lo, 0);
+		for (unsigned int more = 0; more <= 1; more++) {
+			memset(m.data, 0xcc, sizeof(m.data));
+			m.flags = 0;
+			m.len = m.tag = 0xee; /* Output fields of RECV. */
+			mock.reply.value = lo | (u64)len << 48 | 1ULL << 51 |
+					   (u64)more << 52 | (u64)tag << 53;
+			assert(call(PAULI_MAIL_RECV, &m) == 0 && mock.writes == 1);
+			check_wire(10, 8, epoch, 0, 0);
+			assert(m.id == 8 && m.epoch == epoch && m.tag == tag && m.len == len);
+			assert(m.flags == (PAULI_MAIL_PRESENT | (more ? PAULI_MAIL_MORE : 0)));
+			for (unsigned int i = 0; i < sizeof(m.data); i++)
+				assert(m.data[i] == (i < len ? bytes[i] : 0));
+		}
+	}
+	m.flags = 0;
+	mock.reply.value = 0;
+	assert(call(PAULI_MAIL_RECV, &m) == 0 && !m.len && !m.flags && !m.tag);
+	for (unsigned int i = 0; i < sizeof(m.data); i++)
+		assert(!m.data[i]);
+	for (size_t i = 0; i < sizeof(malformed)/sizeof(malformed[0]); i++) {
+		mock.reply.value = malformed[i];
+		assert(call(PAULI_MAIL_RECV, &m) == -EIO && mock.ecalls == 1 && !mock.writes);
+	}
+	mock.reply.value = 1;
+	assert(call(PAULI_MAIL_SEND, &m) == -EIO && mock.ecalls == 1 && !mock.writes);
+	for (size_t i = 0; i < sizeof(cmds)/sizeof(cmds[0]); i++) {
+		m.id = 0;
+		rejected(cmds[i], &m);
+		m.id = 9;
+		rejected(cmds[i], &m);
+		m.id = 1; m.flags = PAULI_MAIL_PRESENT;
+		rejected(cmds[i], &m);
+		m.flags = 0;
+	}
+	for (unsigned int len = 0; len <= PAULI_MAIL_MAX; len++) {
+		m.len = len;
+		for (unsigned int i = len; i < sizeof(m.data); i++) {
+			m.data[i] = 0xa5;
+			rejected(PAULI_MAIL_SEND, &m);
+			m.data[i] = 0;
+		}
+	}
+	m.len = 7;
+	rejected(PAULI_MAIL_SEND, &m);
+	m.len = 255;
+	rejected(PAULI_MAIL_SEND, &m);
+	mock.reply.value = 0;
+}
+
 static void errors_and_copy_faults(void)
 {
 	const struct { long sbi; int error; } errors[] = {
@@ -370,10 +440,11 @@ static void errors_and_copy_faults(void)
 	struct pauli_vm vm = {.id = 2, .epoch = 7};
 	struct pauli_memory mem = {.id = 2, .epoch = 7};
 	struct pauli_log log = {.id = 2, .epoch = 7};
+	struct pauli_mail mail = {.id = 2};
 	struct pauli_info info;
 	const struct { unsigned int cmd; void *arg; } requests[] = {
 		{PAULI_START, &vm}, {PAULI_DESTROY, &vm}, {PAULI_CREATE, &create}, {PAULI_MEMORY, &mem},
-		{PAULI_LOG_READ, &log},
+		{PAULI_LOG_READ, &log}, {PAULI_MAIL_RECV, &mail}, {PAULI_MAIL_SEND, &mail},
 	};
 	for (size_t i = 0; i < sizeof(requests)/sizeof(requests[0]); ++i) {
 		mock.read_fault = true;
@@ -386,8 +457,12 @@ static void errors_and_copy_faults(void)
 		}
 		mock.reply.error = 0;
 		mock.write_fault = true;
-		assert(call(requests[i].cmd, requests[i].arg) == -EFAULT);
-		assert(mock.ecalls == 1 && mock.writes == 1); // Mutation may already have completed.
+		if (requests[i].cmd == PAULI_MAIL_SEND) {
+			assert(call(PAULI_MAIL_SEND, &mail) == 0 && mock.ecalls == 1 && !mock.writes);
+		} else {
+			assert(call(requests[i].cmd, requests[i].arg) == -EFAULT);
+			assert(mock.ecalls == 1 && mock.writes == 1); // Mutation may already have completed.
+		}
 		mock.write_fault = false;
 	}
 	mock.write_fault = true;
@@ -403,9 +478,10 @@ int main(void)
 	rejected_creates();
 	memory_bytes();
 	logs();
+	mail();
 	errors_and_copy_faults();
 	hv_exit();
 	assert(!registered);
-	puts("PASS: Pauli driver probe, ioctl ABI, SBI words and replies, log chunks and overruns, validation, credentials and copy faults");
+	puts("PASS: Pauli driver probe, ioctl ABI, SBI words and replies, log chunks, mailbox records, validation, credentials and copy faults");
 	return 0;
 }

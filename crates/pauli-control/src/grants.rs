@@ -8,8 +8,8 @@ pub(super) struct Grant {
     pub source: u32,
     pub vm: VmId,
     pub rights: Rights,
-    /// LOG is specific to the bytes of this incarnation. Lifecycle authority
-    /// still applies to the configured resource across a cold restart.
+    /// LOG and MAIL bind to this incarnation. Lifecycle authority applies
+    /// to the configured resource across a cold restart.
     pub target_epoch: u32,
 }
 pub struct GrantPage {

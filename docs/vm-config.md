@@ -103,7 +103,7 @@ vm start <name> [--attach]
 vm attach <name>
 vm detach
 vm stop <name>
-vm grant <source> <target> <inspect,start,stop,console,log,create,shape,diskN,destroy|all>
+vm grant <source> <target> <inspect,start,stop,console,log,mail,create,shape,diskN,destroy|all>
 vm revoke <source> <target>
 shutdown
 ```
@@ -181,7 +181,7 @@ board capacity only. RAM charges sum the children's actual bytes, so two
 512 KiB guests use exactly 1 MiB. Stopped children still count. A cold restart revokes
 old credentials, not resource charges. A sponsor can be destroyed only after
 all its children have actually been destroyed. The creator receives inspect, start,
-stop, console, log and destroy rights on its new child.
+stop, console, log, mail and destroy rights on its new child.
 The scalar SBI management ABI (EID `0x08004f49`, FID 1) keeps version 1:
 CREATE takes `[1,3,template_id,template_epoch,name_lo,name_hi]`; the name
 is little-endian ASCII with zero padding and success returns `id<<32 | epoch`.
@@ -214,6 +214,29 @@ by that count. Zero count denotes the current end. If data was overwritten,
 bit 51 is set, the count is zero and bits 0–47 hold the oldest retained
 cursor to resume from. Bits 52–63 are zero. A cursor beyond the current end
 or an overrun cursor that cannot fit in 48 bits returns an error.
+
+### Copied guest mailbox
+
+The independent `mail` right (bit 12) lets a guest send to and receive
+from a particular peer. Both guest incarnations are bound to the grant.
+Epoch zero selects its bound peer epoch, including for a caller with only
+`mail`. A cold restart expires access through the previous binding.
+Configure both directions for a two-party protocol. A newly created child's
+creator receives `mail` on the child. Grant the reverse direction separately.
+
+* MAIL_SEND takes `[1,9,peer,epoch | len<<32 | tag<<40,payload,0]`. Pack
+  zero to six bytes little-endian in the payload word, zero all unused bits
+  and use an 8-bit tag. Success returns zero. Sending requires a ready peer.
+* MAIL_RECV takes `[1,10,peer,epoch,0,0]`. It pops the oldest message in
+  the caller's inbox from that peer incarnation. Zero means empty. A message
+  carries payload in bits 0–47, length in 48–50, presence in 51, more from
+  the same peer in 52 and the tag in 53–60. A zero-byte message sets bit 51.
+
+Each inbox admits sixteen messages total and eight per sender incarnation.
+Both limits return SBI invalid state on overflow. Operations are nonblocking
+and exchange only copied scalars. Receivers poll. Queued messages survive
+the sender stopping or faulting in its current epoch. A cold receiver starts
+with an empty inbox.
 
 ## Local smoke gate
 

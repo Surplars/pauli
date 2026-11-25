@@ -5,7 +5,7 @@ use super::irq_bank::IrqBank;
 use crate::{
     HvError, Result,
     arch::{GuestIo, IrqRegion, RegisterAccess, VirtualIrqChip},
-    backends::{block::Block, console::Console, net::Net, rtc::Rtc},
+    backends::{block::Block, console::Console, mailbox::Mailbox, net::Net, rtc::Rtc},
     board::Board,
     bus::{DeviceId, MmioBus},
     memory::{Arena, GuestRam},
@@ -37,6 +37,7 @@ impl DeviceLinks {
 pub struct IoState {
     pub ram: GuestRam,
     pub console: Console,
+    pub(crate) mailbox: Mailbox,
     pub block: Option<Block>,
     pub net: Option<Net>,
     pub rtc: Rtc,
@@ -93,6 +94,7 @@ impl<I: VirtualIrqChip> VmDevices<I> {
             io: SpinLock::new(IoState {
                 ram,
                 console: Console::new((hz / 1000).max(1)),
+                mailbox: Mailbox::new(),
                 block,
                 net,
                 rtc: Rtc::new(unix, now, hz),

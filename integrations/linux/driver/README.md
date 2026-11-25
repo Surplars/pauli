@@ -20,6 +20,8 @@ See the [UAPI header](../include/uapi/linux/pauli.h).
 | PAULI_CREATE | 0x75 | pauli_create (40) | New child ID and epoch (ops 3 / 5 / 7) |
 | PAULI_MEMORY | 0x76 | pauli_memory (16) | Exact unsigned 64-bit memory size in bytes (op 6) |
 | PAULI_LOG_READ | 0x77 | pauli_log (280) | Up to 256 console bytes and next cursor, or an overrun resume cursor (op 8) |
+| PAULI_MAIL_SEND | 0x78 | pauli_mail (20) | Enqueue a tagged message on a ready peer (op 9) |
+| PAULI_MAIL_RECV | 0x79 | pauli_mail (20) | Remove the oldest message from one peer (op 10) |
 
 Each FID 1 call carries six scalars `[1, op, id, metadata, lo, hi]`. INSPECT
 uses zero metadata. START, STOP, DESTROY and MEMORY require the target's
@@ -46,6 +48,18 @@ If the requested byte has been overwritten, the call returns
 read in the same ioctl, the driver returns those bytes first. A subsequent
 read at the returned cursor reports the gap. Each scalar read checks the
 caller's log grant and the target epoch, including for a terminal VM.
+
+Both mailbox ioctls take a peer ID and zero input flags. An epoch of zero
+selects the incarnation named by the caller's `mail` grant. SEND takes an
+8-bit tag, a length from zero through six and a byte array padded with zeros
+through byte 7. Its single SBI call carries the epoch in bits 0–31, length
+in 32–34 and tag in 40–47 of metadata. The low payload word carries bytes
+in little-endian order. RECV passes the epoch and two zero words. A zero
+reply means empty. Otherwise bits 48–50 hold length, bit 51 signals a
+message, bit 52 signals more from this peer, and bits 53–60 hold the tag.
+Unused wire bits are zero. The driver returns `PAULI_MAIL_PRESENT` even
+for a zero-byte message and clears unused output bytes. Clear flags before
+the next call. A copy-out fault after a pop consumes the message.
 
 `EPERM` indicates a failed Linux capability check. `EACCES` indicates an
 HS denial. `EINVAL` covers malformed inputs and invalid or missing targets.

@@ -55,6 +55,20 @@ impl Backend for Domains {
     fn console_read(&self, _: VmId, _: u32, cursor: u64) -> Result<ConsoleChunk, Error> {
         super::logs::read_sample(cursor)
     }
+    fn mail_recv(
+        &self,
+        receiver: VmId,
+        epoch: u32,
+        peer: VmId,
+        peer_epoch: u32,
+    ) -> Result<MailChunk, Error> {
+        assert_eq!((receiver, epoch), (VmId(1), 1));
+        assert_eq!(self.info(peer)?.epoch, peer_epoch);
+        Ok(MailChunk {
+            message: None,
+            more: false,
+        })
+    }
     fn grant_page(&self) -> Result<&'static mut GrantPage, Error> {
         self.pages
             .set(self.pages.get().checked_sub(1).ok_or(Error::NoSpace)?);
@@ -126,6 +140,15 @@ fn directory_growth_preserves_create_revoke_and_epoch_bound_destruction() {
         Some(super::logs::read_sample(0).unwrap())
     );
     assert_eq!(s.execute(peer, read, &mut b), Err(Error::Denied));
+    let recv = request(high.vm.0, 0, Operation::MailRecv);
+    assert_eq!(
+        s.execute(admin, recv, &mut b).unwrap().mail,
+        Some(MailChunk {
+            message: None,
+            more: false
+        })
+    );
+    assert_eq!(s.execute(peer, recv, &mut b), Err(Error::Denied));
     assert_eq!(s.execute(peer, inspect, &mut b), Err(Error::Denied));
     s.grant(Caller::Host, 3, high.vm, Rights::INSPECT, &b)
         .unwrap();

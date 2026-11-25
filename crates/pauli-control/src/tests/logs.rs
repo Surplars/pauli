@@ -84,6 +84,7 @@ fn log_read_packs_binary_eof_and_exact_overrun_without_exposing_padding() {
                 info,
                 changed: false,
                 log: Some(chunk),
+                mail: None,
             }),
         )
     };

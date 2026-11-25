@@ -11,6 +11,8 @@ struct Runtime {
     next_epoch: u32,
     reads: Cell<usize>,
     log_read: Cell<Option<(VmId, u32, u64)>>,
+    mail_call: Cell<Option<mail::Exchange>>,
+    mail_result: Cell<Result<MailChunk, Error>>,
     effects: Vec<(VmId, Operation)>,
     fail_boot: bool,
 }
@@ -30,6 +32,11 @@ impl Runtime {
             next_epoch: 14,
             reads: Cell::new(0),
             log_read: Cell::new(None),
+            mail_call: Cell::new(None),
+            mail_result: Cell::new(Ok(MailChunk {
+                message: None,
+                more: false,
+            })),
             effects: Vec::new(),
             fail_boot: false,
         }
@@ -83,6 +90,35 @@ impl Backend for Runtime {
         self.log_read.set(Some((vm, epoch, cursor)));
         logs::read_sample(cursor)
     }
+    fn mail_send(
+        &self,
+        vm: VmId,
+        epoch: u32,
+        peer: VmId,
+        peer_epoch: u32,
+        message: MailMessage,
+    ) -> Result<(), Error> {
+        self.mail_call.set(Some(mail::Exchange {
+            local: (vm, epoch),
+            peer: (peer, peer_epoch),
+            operation: Operation::MailSend(message),
+        }));
+        self.mail_result.get().map(|_| ())
+    }
+    fn mail_recv(
+        &self,
+        vm: VmId,
+        epoch: u32,
+        peer: VmId,
+        peer_epoch: u32,
+    ) -> Result<MailChunk, Error> {
+        self.mail_call.set(Some(mail::Exchange {
+            local: (vm, epoch),
+            peer: (peer, peer_epoch),
+            operation: Operation::MailRecv,
+        }));
+        self.mail_result.get()
+    }
 }
 fn request(vm: u32, epoch: u32, operation: Operation) -> Request {
     Request {
@@ -93,6 +129,7 @@ fn request(vm: u32, epoch: u32, operation: Operation) -> Request {
 }
 
 mod logs;
+mod mail;
 mod policy;
 mod scale;
 mod transport;

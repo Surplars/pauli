@@ -20,7 +20,7 @@
 enum pauli_sbi_op {
 	OP_INSPECT = 0, OP_START = 1, OP_STOP = 2, OP_CREATE = 3,
 	OP_DESTROY = 4, OP_CREATE_SHAPED = 5, OP_MEMORY_BYTES = 6,
-	OP_CREATE_DISK = 7, OP_CONSOLE_READ = 8,
+	OP_CREATE_DISK = 7, OP_CONSOLE_READ = 8, OP_MAIL_SEND = 9, OP_MAIL_RECV = 10,
 };
 
 /* Status layout shared with pauli-control/src/abi.rs. */
@@ -35,6 +35,12 @@ enum pauli_sbi_op {
 #define LOG_OVERRUN	BIT_ULL(51)
 #define LOG_SCALAR_BYTES	6
 #define LOG_MAX_CALLS	((PAULI_LOG_CHUNK + LOG_SCALAR_BYTES - 1) / LOG_SCALAR_BYTES)
+
+#define MAIL_PAYLOAD	GENMASK_ULL(47, 0)
+#define MAIL_LENGTH	GENMASK_ULL(50, 48)
+#define MAIL_PRESENT	BIT_ULL(51)
+#define MAIL_MORE	BIT_ULL(52)
+#define MAIL_TAG	GENMASK_ULL(60, 53)
 
 static struct pauli_info hv_info;
 
@@ -180,6 +186,50 @@ static long hv_log_read(void __user *arg)
 	return copy_to_user(arg, &req, sizeof(req)) ? -EFAULT : 0;
 }
 
+static long hv_mail(void __user *arg, unsigned int op)
+{
+	struct pauli_mail req;
+	struct sbiret ret;
+	u64 payload = 0, metadata, word;
+	unsigned int i;
+	int err;
+
+	if (copy_from_user(&req, arg, sizeof(req)))
+		return -EFAULT;
+	if (!valid_id(req.id) || req.flags)
+		return -EINVAL;
+
+	if (op == OP_MAIL_SEND) {
+		if (req.len > PAULI_MAIL_MAX)
+			return -EINVAL;
+		for (i = 0; i < req.len; i++)
+			payload |= (u64)req.data[i] << (8 * i);
+		for (; i < sizeof(req.data); i++)
+			if (req.data[i])
+				return -EINVAL;
+		metadata = req.epoch | ((u64)req.len << 32) | ((u64)req.tag << 40);
+		ret = hv_call(op, req.id, metadata, payload, 0);
+		return ret.error ? hv_errno(ret.error) : (ret.value ? -EIO : 0);
+	}
+
+	ret = hv_call(op, req.id, req.epoch, 0, 0);
+	err = hv_errno(ret.error);
+	if (err)
+		return err;
+	word = (u64)ret.value;
+	req.len = FIELD_GET(MAIL_LENGTH, word);
+	if ((word >> 61) || (!(word & MAIL_PRESENT) && word) ||
+	    req.len > PAULI_MAIL_MAX || ((word & MAIL_PAYLOAD) >> (8 * req.len)))
+		return -EIO;
+	req.tag = FIELD_GET(MAIL_TAG, word);
+	if (word & MAIL_PRESENT)
+		req.flags = PAULI_MAIL_PRESENT | ((word & MAIL_MORE) ? PAULI_MAIL_MORE : 0);
+	for (i = 0; i < sizeof(req.data); i++)
+		req.data[i] = i < req.len ? word >> (8 * i) : 0;
+	/* A successful receive has already removed the message, including on EFAULT. */
+	return copy_to_user(arg, &req, sizeof(req)) ? -EFAULT : 0;
+}
+
 static long hv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	void __user *out = (void __user *)arg;
@@ -216,6 +266,10 @@ static long hv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return hv_memory(out);
 	case PAULI_LOG_READ:
 		return hv_log_read(out);
+	case PAULI_MAIL_SEND:
+		return hv_mail(out, OP_MAIL_SEND);
+	case PAULI_MAIL_RECV:
+		return hv_mail(out, OP_MAIL_RECV);
 	default:
 		return -ENOTTY;
 	}
@@ -273,6 +327,13 @@ static int __init hv_init(void)
 	static_assert(offsetof(struct pauli_log, len) == 16);
 	static_assert(offsetof(struct pauli_log, flags) == 20);
 	static_assert(offsetof(struct pauli_log, data) == 24);
+	static_assert(sizeof(struct pauli_mail) == 20);
+	static_assert(offsetof(struct pauli_mail, id) == 0);
+	static_assert(offsetof(struct pauli_mail, epoch) == 4);
+	static_assert(offsetof(struct pauli_mail, tag) == 8);
+	static_assert(offsetof(struct pauli_mail, len) == 9);
+	static_assert(offsetof(struct pauli_mail, flags) == 10);
+	static_assert(offsetof(struct pauli_mail, data) == 12);
 	if (sbi_probe_extension(PAULI_SBI_EID) <= 0)
 		return -ENODEV;
 	ret = sbi_ecall(PAULI_SBI_EID, 0, 0, 0, 0, 0, 0, 0);

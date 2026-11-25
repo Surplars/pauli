@@ -94,7 +94,10 @@ impl Service {
             *entry = Some(Grant {
                 source,
                 vm: info.vm,
-                rights: Rights::ALL.union(Rights::DESTROY).union(Rights::LOG),
+                rights: Rights::ALL
+                    .union(Rights::DESTROY)
+                    .union(Rights::LOG)
+                    .union(Rights::MAIL),
                 target_epoch: info.epoch,
             });
         }
@@ -102,6 +105,7 @@ impl Service {
             info,
             changed: true,
             log: None,
+            mail: None,
         })
     }
 
@@ -119,6 +123,7 @@ impl Service {
             info: before,
             changed: true,
             log: None,
+            mail: None,
         })
     }
 }

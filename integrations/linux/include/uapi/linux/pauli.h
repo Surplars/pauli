@@ -74,4 +74,20 @@ struct pauli_log {
 
 #define PAULI_LOG_READ	_IOWR('P', 0x77, struct pauli_log)
 
+#define PAULI_MAIL_MAX		6
+#define PAULI_MAIL_PRESENT	(1U << 0)
+#define PAULI_MAIL_MORE		(1U << 1)
+
+struct pauli_mail {
+	__u32 id;	/* Peer VM ID. */
+	__u32 epoch;	/* Zero selects the peer epoch bound to the MAIL grant. */
+	__u8 tag;
+	__u8 len;
+	__u16 flags;	/* In: zero. Out: PAULI_MAIL_PRESENT and PAULI_MAIL_MORE. */
+	__u8 data[8];	/* Six payload bytes at most. Unused bytes are zero. */
+};
+
+#define PAULI_MAIL_SEND	_IOW('P', 0x78, struct pauli_mail)
+#define PAULI_MAIL_RECV	_IOWR('P', 0x79, struct pauli_mail)
+
 #endif /* _UAPI_LINUX_PAULI_H */

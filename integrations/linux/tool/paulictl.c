@@ -21,8 +21,9 @@ struct command {
 	unsigned long op;
 	uint32_t id, epoch, timeout_ms;
 	uint64_t cursor;
-	bool wait, follow, has_timeout;
+	bool wait, follow, raw, has_epoch, has_timeout;
 	struct pauli_create create;
+	struct pauli_mail mail;
 };
 
 static void usage(FILE *out)
@@ -31,9 +32,17 @@ static void usage(FILE *out)
 	      "       paulictl {start|destroy|memory} TARGET [--epoch E]\n"
 	      "       paulictl stop TARGET [--epoch E] [--wait [--timeout-ms MS]]\n"
 	      "       paulictl logs TARGET [--epoch E] [--cursor N] [--follow [--timeout-ms MS]]\n"
+	      "       paulictl send TARGET [--epoch E] [--tag N] [--hex HEX | TEXT]\n"
+	      "       paulictl recv TARGET [--epoch E] [--wait [--timeout-ms MS]] [--raw]\n"
 	      "       paulictl create TEMPLATE NAME [--epoch E] [--vcpus N] [--memory-mib M] [--disk 0..3]\n"
 	      "  TARGET and TEMPLATE accept a public VM ID or service (ID 2).\n"
-	      "  Stop waits default to 30000 ms. Log following has no default timeout.\n", out);
+	      "  Stop and receive waits default to 30000 ms. Log following has no default timeout.\n"
+	      "  Mail uses the inspected peer epoch by default. --epoch 0 uses the granted epoch\n"
+	      "  without inspecting and shows epoch=0 in the reply. Tags range from 0 to 255.\n"
+	      "  Send copies up to 6 bytes (default empty) and succeeds silently.\n"
+	      "  Use -- TEXT for literal text beginning with --.\n"
+	      "  Receive prints vm, epoch, tag, len, more and hex for one message, or empty=1.\n"
+	      "  --raw writes just the payload. A zero-byte message also completes --wait.\n", out);
 }
 
 static bool number64(const char *text, uint64_t min, uint64_t max, uint64_t *out)
@@ -73,6 +82,32 @@ static bool valid_name(const char *name)
 		strspn(name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") == len;
 }
 
+static int hex_digit(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+static bool hex_payload(struct pauli_mail *mail, const char *text)
+{
+	size_t n = strlen(text);
+	if (n > 2 * PAULI_MAIL_MAX || n % 2)
+		return false;
+	mail->len = n / 2;
+	for (size_t i = 0; i < mail->len; i++) {
+		int hi = hex_digit(text[2 * i]), lo = hex_digit(text[2 * i + 1]);
+		if (hi < 0 || lo < 0)
+			return false;
+		mail->data[i] = (hi << 4) | lo;
+	}
+	return true;
+}
+
 static bool parse_command(int argc, char **argv, struct command *cmd)
 {
 	static const struct {
@@ -82,7 +117,7 @@ static bool parse_command(int argc, char **argv, struct command *cmd)
 		{"info", PAULI_INFO}, {"list", LIST_COMMAND}, {"status", PAULI_INSPECT},
 		{"start", PAULI_START}, {"stop", PAULI_STOP}, {"destroy", PAULI_DESTROY},
 		{"create", PAULI_CREATE}, {"memory", PAULI_MEMORY},
-		{"logs", PAULI_LOG_READ},
+		{"logs", PAULI_LOG_READ}, {"send", PAULI_MAIL_SEND}, {"recv", PAULI_MAIL_RECV},
 	};
 	*cmd = (struct command){.timeout_ms = DEFAULT_TIMEOUT_MS};
 	if (argc < 2)
@@ -100,7 +135,8 @@ static bool parse_command(int argc, char **argv, struct command *cmd)
 		return argc == 3;
 
 	int i = 3;
-	bool has_cursor = false;
+	bool has_cursor = false, has_tag = false, has_payload = false;
+	bool mail = cmd->op == PAULI_MAIL_SEND || cmd->op == PAULI_MAIL_RECV;
 	if (cmd->op == PAULI_CREATE) {
 		if (i == argc || !valid_name(argv[i]))
 			return false;
@@ -109,7 +145,26 @@ static bool parse_command(int argc, char **argv, struct command *cmd)
 	}
 	while (i < argc) {
 		const char *option = argv[i++];
-		if (!strcmp(option, "--wait") && cmd->op == PAULI_STOP && !cmd->wait) {
+		if (cmd->op == PAULI_MAIL_SEND && (!strcmp(option, "--") || strncmp(option, "--", 2))) {
+			if (!strcmp(option, "--")) {
+				if (i != argc - 1)
+					return false;
+				option = argv[i++];
+			}
+			size_t n = strlen(option);
+			if (has_payload || n > PAULI_MAIL_MAX)
+				return false;
+			memcpy(cmd->mail.data, option, n);
+			cmd->mail.len = n;
+			has_payload = true;
+			continue;
+		}
+		if (!strcmp(option, "--raw") && cmd->op == PAULI_MAIL_RECV && !cmd->raw) {
+			cmd->raw = true;
+			continue;
+		}
+		if (!strcmp(option, "--wait") &&
+		    (cmd->op == PAULI_STOP || cmd->op == PAULI_MAIL_RECV) && !cmd->wait) {
 			cmd->wait = true;
 			continue;
 		}
@@ -121,15 +176,25 @@ static bool parse_command(int argc, char **argv, struct command *cmd)
 			return false;
 		const char *value = argv[i++];
 		uint32_t n;
-		if (!strcmp(option, "--epoch") && !cmd->epoch) {
-			if (!number(value, 1, UINT32_MAX, &cmd->epoch))
+		if (!strcmp(option, "--epoch") && !cmd->has_epoch) {
+			if (!number(value, mail ? 0 : 1, UINT32_MAX, &cmd->epoch))
 				return false;
+			cmd->has_epoch = true;
+		} else if (cmd->op == PAULI_MAIL_SEND && !strcmp(option, "--tag") && !has_tag) {
+			if (!number(value, 0, UINT8_MAX, &n))
+				return false;
+			cmd->mail.tag = n;
+			has_tag = true;
+		} else if (cmd->op == PAULI_MAIL_SEND && !strcmp(option, "--hex") && !has_payload) {
+			if (!hex_payload(&cmd->mail, value))
+				return false;
+			has_payload = true;
 		} else if (cmd->op == PAULI_LOG_READ && !strcmp(option, "--cursor") && !has_cursor) {
 			if (!number64(value, 0, UINT64_MAX, &cmd->cursor))
 				return false;
 			has_cursor = true;
 		} else if (!strcmp(option, "--timeout-ms") && !cmd->has_timeout &&
-			   (cmd->op == PAULI_STOP || cmd->op == PAULI_LOG_READ)) {
+			   (cmd->op == PAULI_STOP || cmd->op == PAULI_LOG_READ || cmd->op == PAULI_MAIL_RECV)) {
 			if (!number(value, 0, UINT32_MAX, &cmd->timeout_ms))
 				return false;
 			cmd->has_timeout = true;
@@ -288,6 +353,62 @@ static int read_logs(int fd, const struct command *cmd, uint32_t epoch)
 	}
 }
 
+static int print_mail(const struct pauli_mail *mail, bool raw)
+{
+	if (raw) {
+		if (fwrite(mail->data, 1, mail->len, stdout) != mail->len)
+			return -1;
+	} else {
+		static const char digits[] = "0123456789abcdef";
+		char hex[2 * PAULI_MAIL_MAX + 1];
+		for (size_t i = 0; i < mail->len; i++) {
+			hex[2 * i] = digits[mail->data[i] >> 4];
+			hex[2 * i + 1] = digits[mail->data[i] & 15];
+		}
+		hex[2 * mail->len] = '\0';
+		if (printf("vm=%" PRIu32 " epoch=%" PRIu32 " tag=%u len=%u more=%u hex=%s\n",
+			   mail->id, mail->epoch, mail->tag, mail->len,
+			   !!(mail->flags & PAULI_MAIL_MORE), hex) < 0)
+			return -1;
+	}
+	return fflush(stdout);
+}
+
+static int recv_mail(int fd, const struct command *cmd, uint32_t epoch)
+{
+	struct timespec limit;
+	if (cmd->wait) {
+		if (clock_gettime(CLOCK_MONOTONIC, &limit) < 0)
+			return -1;
+		limit = plus_ms(limit, cmd->timeout_ms);
+	}
+	for (;;) {
+		struct pauli_mail mail = {.id = cmd->id, .epoch = epoch};
+		if (ioctl(fd, PAULI_MAIL_RECV, &mail) < 0)
+			return -1;
+		if (mail.epoch != epoch) {
+			errno = ESTALE;
+			return -1;
+		}
+		if (mail.id != cmd->id || mail.len > PAULI_MAIL_MAX ||
+		    mail.flags & ~(PAULI_MAIL_PRESENT | PAULI_MAIL_MORE) ||
+		    (!(mail.flags & PAULI_MAIL_PRESENT) && (mail.len || mail.tag || mail.flags))) {
+			errno = EPROTO;
+			return -1;
+		}
+		if (mail.flags & PAULI_MAIL_PRESENT)
+			return print_mail(&mail, cmd->raw);
+		if (!cmd->wait) {
+			if (!cmd->raw && puts("empty=1") == EOF)
+				return -1;
+			return fflush(stdout);
+		}
+		/* A successful empty dequeue can be polled. A failed dequeue may have consumed mail. */
+		if (next_poll(&limit, true) < 0 || next_poll(&limit, false) < 0)
+			return -1;
+	}
+}
+
 static int request(int fd, const struct command *cmd)
 {
 	struct pauli_vm vm;
@@ -310,7 +431,7 @@ static int request(int fd, const struct command *cmd)
 	}
 
 	uint32_t epoch = cmd->epoch;
-	if (!epoch) {
+	if (!cmd->has_epoch) {
 		if (inspect(fd, cmd->id, &vm) < 0)
 			return -1;
 		if (cmd->op == PAULI_INSPECT) {
@@ -321,6 +442,14 @@ static int request(int fd, const struct command *cmd)
 	}
 	if (cmd->op == PAULI_LOG_READ)
 		return read_logs(fd, cmd, epoch);
+	if (cmd->op == PAULI_MAIL_SEND) {
+		struct pauli_mail mail = cmd->mail;
+		mail.id = cmd->id;
+		mail.epoch = epoch;
+		return ioctl(fd, PAULI_MAIL_SEND, &mail);
+	}
+	if (cmd->op == PAULI_MAIL_RECV)
+		return recv_mail(fd, cmd, epoch);
 	if (cmd->op == PAULI_CREATE) {
 		struct pauli_create child = cmd->create;
 		child.template_id = cmd->id;

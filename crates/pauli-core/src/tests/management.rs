@@ -13,6 +13,8 @@ use crate::{
 use pauli_control::{Backend, Caller, Error, Operation, Request, Rights, Service, VmId};
 #[cfg(feature = "guest-control")]
 mod boot_grant;
+#[cfg(feature = "guest-control")]
+mod mail;
 
 #[test]
 fn command_grammar_is_exact() {
@@ -249,5 +251,10 @@ fn queued_management_creation_or_start_cannot_reopen_shutdown_admission() {
         call([1, abi::CONSOLE_READ, id, epoch, 0, 0], false),
         abi::Return { error: 0, value: 0 },
         "creation grants the sponsor LOG on the new child's empty console"
+    );
+    assert_eq!(
+        call([1, abi::MAIL_RECV, id, 0, 0, 0], false),
+        abi::Return { error: 0, value: 0 },
+        "the creator has epoch-bound MAIL authority for its new child"
     );
 }

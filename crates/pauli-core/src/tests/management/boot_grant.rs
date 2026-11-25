@@ -69,7 +69,7 @@ fn extension_discovery_and_boot_names_do_not_confer_authority() {
 
 #[test]
 fn board_grant_is_narrow_and_refreshes_only_for_a_new_manager() {
-    for queued_op in [2, abi::CONSOLE_READ] {
+    for queued_op in [2, abi::CONSOLE_READ, abi::MAIL_SEND, abi::MAIL_RECV] {
         check_manager_restart(queued_op);
     }
 }

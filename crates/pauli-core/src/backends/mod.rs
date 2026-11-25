@@ -3,5 +3,6 @@
 //! Invariants: only copied host buffers enter native I/O; no guest DMA addresses.
 pub mod block;
 pub mod console;
+pub(crate) mod mailbox;
 pub mod net;
 pub mod rtc;
