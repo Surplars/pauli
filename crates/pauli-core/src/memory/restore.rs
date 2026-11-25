@@ -80,7 +80,7 @@ impl GuestRam {
 /// # Safety
 /// `[dst, dst + len)` must be retained, writable foreign RAM with no running
 /// guest, device DMA, or aliased Rust reference observing those bytes.
-unsafe fn zero_volatile(mut dst: usize, mut len: usize) {
+pub(super) unsafe fn zero_volatile(mut dst: usize, mut len: usize) {
     while len != 0 && (dst & 7) != 0 {
         // SAFETY: caller proved `[dst, dst + len)` is writable foreign RAM.
         unsafe { (dst as *mut u8).write_volatile(0) };

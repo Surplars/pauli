@@ -170,8 +170,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             && (slot.owner != info.boot_cpu
                 || (B::IRQ_DRIVEN_CONSOLE
                     && self.manager.config.disks.iter().all(Option::is_none)
-                    && !vm.config.net_uplink
-                    && vm.config.net_peer.is_none()));
+                    && !vm.config.has_net()));
         let slice_ticks = if uncontended {
             let us = B::UNCONTENDED_QUANTUM_US.unwrap_or(0);
             us.saturating_mul(info.timebase_hz)

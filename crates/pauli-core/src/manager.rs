@@ -15,6 +15,7 @@ use pauli_hal::sync::{Once, SpinLock};
 mod admission;
 mod cell;
 mod directory;
+pub(crate) mod leases;
 pub use admission::Budget;
 mod provision;
 mod shape;
@@ -217,11 +218,20 @@ impl<A: HvArch> VmManager<A> {
         }
     }
     fn refresh_peer_carrier(&self, source: &Vm<A>) {
-        if let Some(peer) = source
-            .config
-            .net_peer
-            .and_then(|slot| self.available(usize::from(slot)))
-        {
+        let slot = if source.config.net_lease.is_some() {
+            // Read the current opposite binding under source I/O -> Channel,
+            // then release both locks before pinning/sampling a different VM.
+            source
+                .devices
+                .io
+                .lock()
+                .net
+                .as_ref()
+                .and_then(|net| net.leased_peer_slot())
+        } else {
+            source.config.net_peer.map(usize::from)
+        };
+        if let Some(peer) = slot.and_then(|slot| self.available(slot)) {
             peer.peer_carrier(self.link());
         }
     }
@@ -237,7 +247,8 @@ impl<A: HvArch> VmManager<A> {
         board.service_devices(now);
         for vm in self.vms() {
             if vm.lifecycle.stopping() {
-                let joining_peer = vm.config.net_peer.is_some() && !vm.lifecycle.joined();
+                let joining_peer = (vm.config.net_peer.is_some() || vm.config.net_lease.is_some())
+                    && !vm.lifecycle.joined();
                 match vm.try_join(now, self.link()) {
                     Ok(true) => {
                         if joining_peer {

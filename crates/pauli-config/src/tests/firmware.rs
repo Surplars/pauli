@@ -45,6 +45,69 @@ fn reciprocal_fixed_peer_roundtrips_between_firmware_and_linux() {
     assert_eq!(decoded.vms[0].unwrap().net_peer, Some(1));
     assert_eq!(decoded.vms[1].unwrap().net_peer, Some(0));
 }
+
+#[test]
+fn leased_net_is_runtime_only_and_uses_the_same_linux_or_firmware_device() {
+    use crate::{GuestBoardLayout, NetLease, guest_dtb::riscv_configured};
+    use pauli_hal::fdt::Fdt;
+
+    let layout = GuestBoardLayout::DEFAULT;
+    let cfg = pair();
+    for (index, vm) in cfg.vms.iter().flatten().enumerate() {
+        let mut child = vm.renamed("child").unwrap();
+        assert!(!child.has_net());
+        let path = format!("/virtio@{:x}", layout.net.base);
+        let mut out = [0; MAX_GUEST_DTB];
+        let len = riscv_configured(&child, layout, 1, "", false, &mut out).unwrap();
+        assert!(
+            Fdt::new(&out[..len])
+                .unwrap()
+                .find(&path)
+                .unwrap()
+                .is_none()
+        );
+        let lease = NetLease::new(3, 1).unwrap();
+        child.net_lease = Some(lease);
+        child.validate_guest_geometry().unwrap();
+        assert!(child.has_net() && !child.renamed("plain").unwrap().has_net());
+        let len = riscv_configured(&child, layout, 1, "", false, &mut out).unwrap();
+        let fdt = Fdt::new(&out[..len]).unwrap();
+        let node = fdt.find(&path).unwrap().unwrap();
+        assert_eq!(
+            node.reg().unwrap(),
+            Some((layout.net.base, layout.net.size))
+        );
+        assert_eq!(node.u32("interrupts").unwrap(), Some(layout.net_irq));
+        let mut manifest = cfg;
+        manifest.vms[index].as_mut().unwrap().net_lease = Some(lease);
+        assert_eq!(manifest.validate(), Err(Error::Network));
+        assert_eq!(manifest.encode(), Err(Error::Network));
+        for (net_peer, net_uplink) in [(Some(0), false), (None, true)] {
+            child.net_peer = net_peer;
+            child.net_uplink = net_uplink;
+            assert_eq!(child.validate_guest_geometry(), Err(Error::Network));
+        }
+        child.net_peer = None;
+        child.net_uplink = false;
+        for lease in [
+            NetLease {
+                channel: 4,
+                side: 0,
+            },
+            NetLease {
+                channel: 0,
+                side: 2,
+            },
+        ] {
+            child.net_lease = Some(lease);
+            assert_eq!(child.validate_guest_geometry(), Err(Error::Network));
+            assert_eq!(
+                riscv_configured(&child, layout, 1, "", false, &mut out),
+                Err(Error::Network)
+            );
+        }
+    }
+}
 #[test]
 fn invalid_permissions_shapes_and_sources_never_enter_the_manifest() {
     for change in [

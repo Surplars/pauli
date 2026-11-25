@@ -119,6 +119,70 @@ fn create(s: &mut Service, b: &mut Domains) -> Result<Info, Error> {
     Ok(reply.info)
 }
 #[test]
+fn leased_create_requires_create_shape_and_the_exact_template_endpoint_grant() {
+    let mut b = Domains::new(0);
+    let mut s = Service::new();
+    let admin = Caller::Guest(1);
+    let endpoint = NetLease::new(3, 1).unwrap();
+    let ticket = Rights::net_lease(endpoint).unwrap();
+    let required = Rights::CREATE.union(Rights::SHAPE).union(ticket);
+    let create = |lease| {
+        let mut spec: ChildSpec = ChildName::new("paired").unwrap().into();
+        spec.net_lease = Some(lease);
+        Operation::Create(spec)
+    };
+    let req = request(2, 2, create(endpoint));
+    assert_eq!(create(endpoint).right(), Ok(required));
+    assert_eq!(Rights::parse("create,shape,net3:1"), Some(required));
+    for rights in [
+        Rights::ALL,
+        Rights::CREATE.union(Rights::SHAPE),
+        Rights::CREATE.union(ticket),
+        Rights::SHAPE.union(ticket),
+        Rights::parse("create,shape,net3:0").unwrap(),
+        Rights::parse("create,shape,net2:1").unwrap(),
+    ] {
+        s.grant(Caller::Host, 1, VmId(2), rights, &b).unwrap();
+        assert_eq!(s.execute(admin, req, &mut b), Err(Error::Denied));
+        assert_eq!(b.creates, 0);
+    }
+    s.grant(Caller::Host, 1, VmId(2), required, &b).unwrap();
+    assert_eq!(
+        s.execute(admin, request(3, 3, create(endpoint)), &mut b),
+        Err(Error::Denied)
+    );
+    assert_eq!(s.execute(Caller::Guest(3), req, &mut b), Err(Error::Denied));
+    for invalid in [
+        NetLease {
+            channel: 255,
+            side: 0,
+        },
+        NetLease {
+            channel: 0,
+            side: 255,
+        },
+    ] {
+        assert_eq!(Rights::net_lease(invalid), None);
+        assert_eq!(
+            s.execute(Caller::Host, request(2, 2, create(invalid)), &mut b),
+            Err(Error::Invalid)
+        );
+    }
+    assert_eq!(b.creates, 0);
+    let child = s.execute(admin, req, &mut b).unwrap().info;
+    // The creator's ordinary child-operating grant carries no lease rights.
+    assert_eq!(
+        s.execute(
+            admin,
+            request(child.vm.0, child.epoch, create(endpoint)),
+            &mut b
+        ),
+        Err(Error::Denied)
+    );
+    assert_eq!(b.creates, 1);
+}
+
+#[test]
 fn directory_growth_preserves_create_revoke_and_epoch_bound_destruction() {
     let mut b = Domains::new(1);
     let mut s = Service::new();

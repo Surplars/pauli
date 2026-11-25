@@ -82,7 +82,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             && B::IRQ_DRIVEN_CONSOLE
             && manager.config.disks.iter().all(Option::is_none)
             && manager.config.vms.iter().flatten().all(|vm| {
-                vm.firmware.is_none() && !vm.net_uplink && vm.net_peer.is_none() && vm.vcpus == 1
+                vm.firmware.is_none() && !vm.has_net() && vm.vcpus == 1
             });
         Ok(Self {
             board,

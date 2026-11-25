@@ -1,4 +1,4 @@
-# Copied Ethernet between fixed guests
+# Copied Ethernet between guests
 
 Two boot VMs with reciprocal `net_peer` slots each see a modern VirtIO-MMIO
 Ethernet device. The host validates and copies every frame. No physical NIC,
@@ -34,7 +34,55 @@ command `vm status NAME` reports `up`, `tx` (enqueues), `rx` (dequeues),
 Frames erased by lifecycle transitions are outside the two TX drop counters.
 Guest socket and driver drops can occur after a successful dequeue.
 
-## QEMU measurement
+## Leases for dynamic guests
+
+The host monitor can give two new children the opposite ends of a copied
+channel. Both templates must be cloneable and the board must provide a
+`DomainPool`. Linux and firmware children use the same VirtIO device and
+private RAM protections as the fixed pair. A child gets a newly rendered DTB
+with the network device at GPA `0x10002000`. Creation fails if the template
+DTB contains opaque data that the renderer cannot preserve.
+
+```text
+hv> vm create linux left --net-lease 3:0
+hv> vm create linux right --net-lease 3:1
+hv> vm start left
+hv> vm start right
+hv> vm status left
+```
+
+Channels are numbered 0–3 and sides are 0 and 1. Channel 3 gives the example
+guests MAC addresses `06:00:00:00:03:00` and `06:00:00:00:03:01`.
+The VM slot and epoch may change when a side is reused. Each receive
+notification therefore identifies the channel allocation and the endpoint
+incarnations. Delivery pins the current target VM and revalidates the
+notification under the receiving device lock before accessing guest memory.
+
+The first endpoint reserves a page-rounded host allocation for both queues
+and their ownership information (48 KiB, or 12 pages, on RV64). A guest sponsor pays for this allocation
+once in its memory budget, in addition to each child's guest RAM. The other
+side must have the same sponsor. Host-created endpoints form a separate
+ownership group. Each side stays reserved while its child is stopped or
+faulted. Device reset or retirement clears both queues. Joined destruction
+releases the side. The last release scrubs the entire channel extent and
+returns it to the pool. A failed create leaves the prior lease and quota
+intact.
+
+The host monitor accepts `--net-lease CHANNEL:SIDE`. Internal guest requests
+require `create`, `shape` and the exact side right on their template, for
+example `net3:0`. The scalar Linux create interface has no lease argument.
+Valence's automatic manager grant supplies no channel-side rights. Static
+boot manifests continue to use `net_peer` for fixed pairs.
+
+The dynamic-path QEMU check started Linux children in VM slots 4 and 5
+(monitor IDs 5 and 6) from networkless templates. Both directions exchanged
+sequenced Ethernet requests and replies. The same check cold-restarted the
+second child, destroyed it, and assigned its side to a new child while the
+first kept running. Across these phases, 160 of 160 requests received the
+expected reply. Creation on an occupied side failed even while its child was
+stopped. The throughput results below use the earlier fixed pair.
+
+## QEMU measurement of the fixed pair
 
 The test runs two 128 MiB Linux guests under Windows QEMU 10.2.90
 (`g82082b8e38-dirty`, TCG) on the `virt` board with
@@ -111,7 +159,7 @@ This measures exit frequency; it does not isolate copy time. Quiet WFI
 counts include the two guest kernels and the existing mixed/SMP maintenance
 schedule. These QEMU timings cannot establish physical Valence latency.
 
-## Static memory
+## Static memory of the fixed pair
 
 The release ELF check includes the preallocated frame store for all four boot
 slots. In the default Valence build, the RAM span rises from 823,296 to
@@ -120,14 +168,7 @@ slots. In the default Valence build, the RAM span rises from 823,296 to
 the largest spans are 905,216 bytes on Valence and 771,696 bytes on QEMU.
 The boot stack does not allocate the frame store when binding a port.
 
-## Next transport decision
-
-For C2, start with **explicit leases for copied endpoints** if a dynamically
-created service needs bulk data. Charge queues against its sponsor, authorize
-both endpoint epochs, and publish a new lease only after the old endpoints
-have quiesced and their buffers have been discarded. This preserves the
-private guest RAM and ordinary VirtIO driver contract measured here. Fixed
-service templates with peer ports continue to be ineligible for cloning.
+## Shared-memory alternative
 
 A fixed shared-memory aperture merits a separate experiment if a target-board
 workload demonstrates that copying dominates its latency or bandwidth budget.

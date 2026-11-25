@@ -118,8 +118,8 @@ fn log_read_packs_binary_eof_and_exact_overrun_without_exposing_padding() {
 
 #[test]
 fn log_grant_is_independent_of_inspection_input_and_lifecycle() {
-    assert_eq!(Rights::LOG.0, 128);
-    assert_eq!(Rights::ALL.0, 15);
+    assert_eq!(Rights::LOG.bits(), 128);
+    assert_eq!(Rights::ALL.bits(), 15);
     assert_eq!(
         Rights::parse("inspect,log"),
         Some(Rights::INSPECT.union(Rights::LOG))

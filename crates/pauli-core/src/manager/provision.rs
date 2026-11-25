@@ -1,8 +1,10 @@
 //! Runtime domains from immutable boot templates. Only Linux children can lease volumes.
 //! Ownership/Lock Ordering: sole management writer; a reserved slot is invisible to workers.
 //! Invariants: new RAM/arena, never a peer's live bytes; destroy is not a synonym for stop.
+use super::leases::LeaseHandle;
 use super::*;
 use crate::board::VmResources;
+use crate::memory::pool::DomainPool;
 use pauli_config::{MAX_GUEST_DTB, VmConfig};
 use pauli_control::{ChildSpec, DiskSlot, VmId};
 const _: () = assert!(DiskSlot::COUNT == pauli_config::MAX_DISKS);
@@ -57,13 +59,19 @@ impl<A: HvArch> VmManager<A> {
             return Err(HvError::Busy);
         }
         let pool = board.domain_pool().ok_or(HvError::Unsupported)?;
+        let sibling = match config.net_lease {
+            Some(lease) => self.sibling_channel(lease, sponsor)?,
+            None => None,
+        };
         self.admit(sponsor, &config)?;
         let (slot, reserved) = self.index.reserve(self.boot_count)?;
         let owners =
             config.owner_mask_excluding(slot, info.boot_cpu, info.host_cpus, self.exclusive_owners);
         let target_sstc = config.firmware.is_none() && A::sstc_available_for_owners(owners);
         let source_sstc = source.guest_sstc();
-        let discovery_changed = reshape || config.control_events != source.config.control_events;
+        let discovery_changed = reshape
+            || config.control_events != source.config.control_events
+            || config.net_lease.is_some();
         let mut change =
             (discovery_changed || source_sstc != target_sstc).then_some(shape::DtbChange {
                 source_sstc,
@@ -93,6 +101,8 @@ impl<A: HvArch> VmManager<A> {
             change.map(|plan| (&source.config, plan)),
             slot,
             resources,
+            pool,
+            sibling,
         );
         let mut vm = match result {
             Ok(vm) => vm,
@@ -118,21 +128,29 @@ impl<A: HvArch> VmManager<A> {
         change: Option<(&VmConfig, shape::DtbChange)>,
         slot: usize,
         mut resources: VmResources,
+        pool: &'static DomainPool,
+        sibling: Option<LeaseHandle>,
     ) -> Result<Vm<A>> {
         config.host_base = resources.ram.host_range().base() as u64;
         if let Some((source, change)) = change {
             shape::rebuild::<A, B>(board, source, &mut config, &mut resources, change)?;
         }
+        let epoch = self.next_epoch()?;
+        let lease = match (config.net_lease, sibling) {
+            (Some(_), None) => Some(LeaseHandle::new(pool, epoch)?),
+            (_, handle) => handle,
+        };
         Vm::build(
             board,
             self.config,
             config,
             slot,
             self.exclusive_owners,
-            self.next_epoch()?, // Rejected geometry or exhausted RAM never consumes an identity.
+            epoch,
             self.links,
             A::Timer::now(),
             resources,
+            lease,
         )
     }
 
@@ -161,6 +179,11 @@ impl<A: HvArch> VmManager<A> {
             return Err(HvError::Permission);
         }
         let cell = self.child_cell(slot).ok_or(HvError::NotFound)?;
+        // A rejected destroy must leave a running receiver visible to peer notifications.
+        // Keep the final retirement checks under the cell's exclusive removal below.
+        if !self.vm(slot)?.lifecycle.joined() {
+            return Err(HvError::Busy);
+        }
         let receipt = cell.remove(|vm| {
             if vm.epoch() != epoch
                 || !vm.lifecycle.joined()

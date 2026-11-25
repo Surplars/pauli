@@ -5,6 +5,9 @@
 //! Lifecycle: unbound -> bound -> active -> retired; reset clears both directions.
 use crate::virtio_net::{FRAME_MAX, NetBackend, NetError};
 
+mod channel;
+pub use channel::{Channel, ChannelEndpoint, Side};
+
 pub const PORTS: usize = 4;
 pub const DEPTH: usize = 16;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,6 +19,7 @@ pub struct Endpoint {
 /// either device invalidates the hint, even without changing a VM epoch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RxReady {
+    incarnation: u32,
     sender: Endpoint,
     receiver: Endpoint,
     generation: u64,
@@ -72,6 +76,17 @@ impl Port {
             rx: 0,
             full: 0,
             down: 0,
+        }
+    }
+    fn snapshot(&self, peer: &Port) -> Snapshot {
+        Snapshot {
+            up: self.active && peer.active,
+            queued: self.len,
+            tx: self.tx,
+            rx: self.rx,
+            dropped: self.full.saturating_add(self.down),
+            full: self.full,
+            down: self.down,
         }
     }
     fn clear(&mut self) {
@@ -157,29 +172,25 @@ impl Link {
         let slot = self.index(endpoint)?;
         let port = &self.ports[slot];
         let peer = &self.ports[port.peer];
-        Ok(Snapshot {
-            up: port.active && peer.active && peer.epoch != 0,
-            queued: port.len,
-            tx: port.tx,
-            rx: port.rx,
-            dropped: port.full.saturating_add(port.down),
-            full: port.full,
-            down: port.down,
-        })
+        Ok(port.snapshot(peer))
     }
     /// Validate the incarnation once. Exclusive borrowing prevents reset,
     /// retirement or rebinding for the complete synchronous service interval.
     pub fn backend(&mut self, endpoint: Endpoint) -> Result<Backend<'_>, Error> {
         let slot = self.index(endpoint)?;
-        Ok(Backend {
-            link: self,
-            slot,
-            enqueued: false,
-        })
+        let peer = self.ports[slot].peer;
+        let [source, target] = self
+            .ports
+            .get_disjoint_mut([slot, peer])
+            .map_err(|_| Error::Invalid)?;
+        Ok(Backend::new(source, target, slot, peer, 0))
     }
     /// Revalidate under the link lock before touching the receiving guest's
     /// rings. This receive-only pass cannot generate a reverse TX notification.
     pub fn receiver(&mut self, endpoint: Endpoint, hint: RxReady) -> Option<Backend<'_>> {
+        if hint.incarnation != 0 {
+            return None;
+        }
         let port = &self.ports[endpoint.slot];
         let sender = &self.ports[hint.sender.slot];
         if endpoint != hint.receiver
@@ -197,26 +208,45 @@ impl Link {
     }
 }
 pub struct Backend<'a> {
-    link: &'a mut Link,
-    slot: usize,
+    source: &'a mut Port,
+    target: &'a mut Port,
+    source_slot: usize,
+    target_slot: usize,
+    incarnation: u32,
     enqueued: bool,
 }
-impl Backend<'_> {
+impl<'a> Backend<'a> {
+    fn new(
+        source: &'a mut Port,
+        target: &'a mut Port,
+        source_slot: usize,
+        target_slot: usize,
+        incarnation: u32,
+    ) -> Self {
+        Self {
+            source,
+            target,
+            source_slot,
+            target_slot,
+            incarnation,
+            enqueued: false,
+        }
+    }
+    pub fn link_up(&self) -> bool {
+        self.source.active && self.target.active
+    }
     pub fn ready(&self) -> Option<RxReady> {
-        self.enqueued.then(|| {
-            let source = &self.link.ports[self.slot];
-            let peer = &self.link.ports[source.peer];
-            RxReady {
-                sender: Endpoint {
-                    slot: self.slot,
-                    epoch: source.epoch,
-                },
-                receiver: Endpoint {
-                    slot: source.peer,
-                    epoch: peer.epoch,
-                },
-                generation: peer.generation,
-            }
+        self.enqueued.then_some(RxReady {
+            incarnation: self.incarnation,
+            sender: Endpoint {
+                slot: self.source_slot,
+                epoch: self.source.epoch,
+            },
+            receiver: Endpoint {
+                slot: self.target_slot,
+                epoch: self.target.epoch,
+            },
+            generation: self.target.generation,
         })
     }
 }
@@ -225,31 +255,27 @@ impl NetBackend for Backend<'_> {
         // The device protocol already validated Ethernet length before copying.
         // Trusted backend call: the frontend already validated frame bounds.
         debug_assert!((14..=FRAME_MAX).contains(&frame.len()));
-        let peer = self.link.ports[self.slot].peer;
-        if !self.link.ports[self.slot].active || !self.link.ports[peer].active {
+        if !self.link_up() {
             // Ethernet loss, not a permanently blocked TX descriptor. A down
             // or full peer cannot retain the sender's queue or host worker.
-            let source = &mut self.link.ports[self.slot];
-            source.down = source.down.saturating_add(1);
+            self.source.down = self.source.down.saturating_add(1);
             return Ok(());
         }
-        if self.link.ports[peer].len == DEPTH {
-            let source = &mut self.link.ports[self.slot];
-            source.full = source.full.saturating_add(1);
+        if self.target.len == DEPTH {
+            self.source.full = self.source.full.saturating_add(1);
             return Ok(());
         }
-        let port = &mut self.link.ports[peer];
+        let port = &mut self.target;
         let frame_slot = &mut port.frames[(port.head + port.len) % DEPTH];
         frame_slot.bytes[..frame.len()].copy_from_slice(frame);
         frame_slot.len = frame.len();
         port.len += 1;
-        let source = &mut self.link.ports[self.slot];
-        source.tx = source.tx.saturating_add(1);
+        self.source.tx = self.source.tx.saturating_add(1);
         self.enqueued = true;
         Ok(())
     }
     fn receive(&mut self, output: &mut [u8]) -> Result<Option<usize>, NetError> {
-        let port = &mut self.link.ports[self.slot];
+        let port = &mut self.source;
         if !port.active || port.len == 0 {
             return Ok(None);
         }

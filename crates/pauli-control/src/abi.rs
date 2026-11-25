@@ -98,6 +98,7 @@ pub fn decode(args: [u64; 6]) -> Result<Request, i64> {
             }
             Operation::Create(ChildSpec {
                 name: ChildName::from_words(args[4], args[5]).ok_or(INVALID_PARAM)?,
+                net_lease: None,
                 // Only the new opcode consumes the high byte: one-based, zero invalid.
                 disk: if args[1] == CREATE_DISK {
                     Some(

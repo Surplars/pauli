@@ -17,6 +17,7 @@ pub mod abi;
 mod grants;
 pub use grants::GrantPage;
 use grants::{Grant, MailWatch};
+pub use pauli_config::NetLease;
 mod provision;
 pub use provision::{ChildName, ChildSpec, DiskSlot, Shape};
 pub mod queue;
@@ -36,27 +37,45 @@ pub enum Caller {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rights(u16);
+// Three bytes keep the eight endpoint permissions in the existing grant-page footprint.
+pub struct Rights([u8; 3]);
+const _: () = assert!(2 * pauli_config::MAX_NET_LEASES <= 8);
 impl Rights {
-    pub const INSPECT: Self = Self(1);
-    pub const START: Self = Self(2);
-    pub const STOP: Self = Self(4);
-    pub const CONSOLE: Self = Self(8);
-    pub const CREATE: Self = Self(16);
-    pub const DESTROY: Self = Self(32);
-    /// Modify CPU/RAM at creation. Never implied by ordinary template cloning.
-    pub const SHAPE: Self = Self(64);
+    const fn from_bits(bits: u32) -> Self {
+        let [a, b, c, _] = bits.to_le_bytes();
+        Self([a, b, c])
+    }
+    const fn bits(self) -> u32 {
+        let [a, b, c] = self.0;
+        u32::from_le_bytes([a, b, c, 0])
+    }
+    pub const INSPECT: Self = Self::from_bits(1);
+    pub const START: Self = Self::from_bits(2);
+    pub const STOP: Self = Self::from_bits(4);
+    pub const CONSOLE: Self = Self::from_bits(8);
+    pub const CREATE: Self = Self::from_bits(16);
+    pub const DESTROY: Self = Self::from_bits(32);
+    /// Modify CPU/RAM or attach an explicitly granted network lease at creation.
+    pub const SHAPE: Self = Self::from_bits(64);
     /// Read the console history of one target epoch, including after it stops.
-    pub const LOG: Self = Self(1 << 7);
+    pub const LOG: Self = Self::from_bits(1 << 7);
     /// Exchange copied messages with a specific peer incarnation.
-    pub const MAIL: Self = Self(1 << 12);
+    pub const MAIL: Self = Self::from_bits(1 << 12);
     /// Legacy operating rights. Provisioning is a separate explicit grant.
-    pub const ALL: Self = Self(15);
+    pub const ALL: Self = Self::from_bits(15);
     pub const fn disk(slot: DiskSlot) -> Self {
-        Self(1 << (8 + slot.index()))
+        Self::from_bits(1 << (8 + slot.index()))
+    }
+    /// One specific channel side on the selected template.
+    pub const fn net_lease(lease: NetLease) -> Option<Self> {
+        if lease.is_valid() {
+            Some(Self::from_bits(1 << (16 + 2 * lease.channel + lease.side)))
+        } else {
+            None
+        }
     }
     pub const fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
+        Self::from_bits(self.bits() | other.bits())
     }
     /// Host-console input only; guest wire requests never carry grant rights.
     pub fn parse(text: &str) -> Option<Self> {
@@ -75,6 +94,7 @@ impl Rights {
                 "shape" => Self::SHAPE,
                 "log" => Self::LOG,
                 "mail" => Self::MAIL,
+                word if word.starts_with("net") => Self::net_lease(word[3..].parse().ok()?)?,
                 word if word.len() == 5 && word.starts_with("disk") => {
                     Self::disk(DiskSlot::new(word.as_bytes()[4].checked_sub(b'0')?)?)
                 }
@@ -85,7 +105,7 @@ impl Rights {
         result
     }
     const fn contains(self, required: Self) -> bool {
-        self.0 & required.0 == required.0
+        self.bits() & required.bits() == required.bits()
     }
 }
 
@@ -126,8 +146,8 @@ pub enum Operation {
     Destroy,
 }
 impl Operation {
-    const fn right(self) -> Rights {
-        match self {
+    fn right(self) -> Result<Rights, Error> {
+        Ok(match self {
             Self::Inspect | Self::MemoryBytes => Rights::INSPECT,
             Self::Start => Rights::START,
             Self::Stop => Rights::STOP,
@@ -136,8 +156,14 @@ impl Operation {
             Self::MailSend(_) | Self::MailRecv => Rights::MAIL,
             Self::Create(spec) => {
                 let mut required = Rights::CREATE;
-                if spec.shape.vcpus.is_some() || spec.shape.memory_mib.is_some() {
+                if spec.shape.vcpus.is_some()
+                    || spec.shape.memory_mib.is_some()
+                    || spec.net_lease.is_some()
+                {
                     required = required.union(Rights::SHAPE);
+                }
+                if let Some(lease) = spec.net_lease {
+                    required = required.union(Rights::net_lease(lease).ok_or(Error::Invalid)?);
                 }
                 if let Some(slot) = spec.disk {
                     required = required.union(Rights::disk(slot));
@@ -145,7 +171,7 @@ impl Operation {
                 required
             }
             Self::Destroy => Rights::DESTROY,
-        }
+        })
     }
 }
 
@@ -504,7 +530,7 @@ impl Service {
     ) -> Result<Reply, Error> {
         // Reject before looking up the target or invoking lifecycle/device work.
         let sender = Self::sender(caller, backend)?;
-        let right = request.operation.right();
+        let right = request.operation.right()?;
         let grant = self.authorize(caller, request.vm, right)?;
         if right == Rights::MAIL && caller == Caller::Host {
             return Err(Error::Unsupported);

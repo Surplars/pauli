@@ -20,8 +20,7 @@ pub(crate) fn validate_embedded(config: &BootConfig) -> Result<()> {
         || config.disks.iter().any(Option::is_some)
         || vm.disk.is_some()
         || vm.writable
-        || vm.net_peer.is_some()
-        || vm.net_uplink
+        || vm.has_net()
         || vm.vcpus != 1
         || vm.dtb_size != 0
         || vm.image.initrd_size != 0

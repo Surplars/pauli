@@ -103,8 +103,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 && (vm.config.firmware.is_some()
                     || vm.config.vcpus != 1
                     || vm.config.disk.is_some()
-                    || vm.config.net_uplink
-                    || vm.config.net_peer.is_some())
+                    || vm.config.has_net())
             {
                 return Wait::Poll;
             }

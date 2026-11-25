@@ -66,6 +66,33 @@ fn ram_alignment(config: &VmConfig) -> usize {
     }
 }
 impl DomainPool {
+    /// Actual page charge for a reclaimable, host-only object.
+    pub(crate) const fn host_bytes<T>() -> usize {
+        assert!(size_of::<T>() != 0);
+        size_of::<T>().next_multiple_of(PAGE_SIZE)
+    }
+
+    /// The receipt outlives all references into this extent, just like a child VM receipt.
+    pub(crate) fn host_object<T>(&'static self) -> Result<(&'static mut MaybeUninit<T>, Receipt)> {
+        let extent = self
+            .0
+            .lock()
+            .take(
+                Self::host_bytes::<T>(),
+                align_of::<T>().max(PAGE_SIZE),
+                true,
+            )
+            .ok_or(HvError::Exhausted)?;
+        // SAFETY: the freshly loaned extent contains an aligned T-sized slot and no live references.
+        let object = unsafe { &mut *(extent.base() as *mut MaybeUninit<T>) };
+        Ok((object, Receipt { pool: self, extent }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn free_pages(&self) -> usize {
+        self.0.lock().capacity(PAGE_SIZE, PAGE_SIZE)
+    }
+
     /// # Safety
     /// Every unreserved byte must be exclusively owned, writable identity-mapped
     /// RAM for the pool's lifetime. Reserve firmware, boot domains, templates,
@@ -208,6 +235,17 @@ unsafe fn init_metadata<T: 'static>(
     unsafe { cells.assume_init_mut() }
 }
 impl Receipt {
+    /// # Safety
+    /// All users and references have retired, as for release(). Erase the complete host allocation,
+    /// including private headers, padding and unused frame capacity, before allocator publication.
+    pub(crate) unsafe fn erase_and_release(self) {
+        // SAFETY: the caller owns every byte exclusively until the allocator receives this receipt.
+        unsafe {
+            super::restore::zero_volatile(self.extent.base(), self.extent.size());
+            self.release();
+        }
+    }
+
     /// # Safety
     /// All contexts, mappings, arena references and device producers must be gone.
     /// Every visited CPU must have retired translations, or the build never ran.

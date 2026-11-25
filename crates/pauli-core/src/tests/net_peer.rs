@@ -43,6 +43,115 @@ fn access(reg: usize, write: Option<usize>) -> MmioAccess {
         write,
     }
 }
+
+pub(super) fn carrier(f: &Fixture, vm: &Vm<Arch>) -> bool {
+    reg(f, vm, 0x104, None) & (1 << 16) != 0
+}
+
+/// Run on the Linux and firmware children created through the manager's lease API.
+pub(super) fn verify_leased_duplex(f: &Fixture, a: &Vm<Arch>, b: &Vm<Arch>) {
+    use std::{sync::Barrier, thread};
+    for vm in [a, b] {
+        assert!(vm.slot >= pauli_config::MAX_BOOT_VMS);
+        setup(f, vm);
+        let lease = vm.config.net_lease.unwrap();
+        assert_eq!(reg(f, vm, 0x100, None), 0x06);
+        assert_eq!(
+            reg(f, vm, 0x104, None) & 0xffff,
+            usize::from(lease.channel) | (usize::from(lease.side) << 8)
+        );
+        assert!(carrier(f, vm));
+    }
+    let receiver_cpu = b.cpu(0).unwrap();
+    let mut dispatcher = Dispatcher::new();
+    receiver_cpu
+        .data
+        .lock()
+        .context
+        .as_mut()
+        .unwrap()
+        .script
+        .push_back(ExitKind::Wait);
+    OWNER.with(|o| o.set(receiver_cpu.owner));
+    for _ in 0..4 {
+        f.runtime.dispatch(&mut dispatcher).unwrap();
+        if receiver_cpu.run_state() == CpuState::Waiting {
+            break;
+        }
+    }
+    assert_eq!(receiver_cpu.run_state(), CpuState::Waiting);
+    // One notification from a different endpoint must complete the posted RX
+    // and publish its interrupt without a management service call.
+    post(b, 0, 0);
+    post(a, 1, 0);
+    let sender_owner = a.cpu(0).unwrap().owner;
+    OWNER.with(|o| o.set(sender_owner));
+    KICKED_OWNERS.with(|k| k.set(0));
+    reg(f, a, NOTIFY, Some(1));
+    assert_eq!(used(b, 0), 1);
+    assert_eq!(reg(f, b, STATUS, None), 1);
+    if sender_owner != receiver_cpu.owner {
+        assert_ne!(
+            KICKED_OWNERS.with(|k| k.get()) & (1 << receiver_cpu.owner),
+            0
+        );
+    }
+    OWNER.with(|o| o.set(receiver_cpu.owner));
+    for _ in 0..4 {
+        f.runtime.dispatch(&mut dispatcher).unwrap();
+        if receiver_cpu.run_state() != CpuState::Waiting {
+            break;
+        }
+    }
+    assert_eq!(receiver_cpu.run_state(), CpuState::Runnable);
+    post(a, 0, 0);
+    post(b, 1, 0);
+    reg(f, b, NOTIFY, Some(1));
+    for vm in [a, b] {
+        reg(f, vm, ACK, Some(3));
+    }
+    let m = &f.runtime.manager;
+    let simultaneous = Barrier::new(2);
+    for start in (1..65).step_by(8) {
+        for vm in [a, b] {
+            for seq in start..start + 8 {
+                post(vm, 0, seq);
+                post(vm, 1, seq);
+            }
+        }
+        thread::scope(|scope| {
+            for vm in [a, b] {
+                let gate = &simultaneous;
+                scope.spawn(move || {
+                    OWNER.with(|o| o.set(vm.cpu(0).unwrap().owner));
+                    gate.wait();
+                    assert_eq!(vm.devices.access(access(NOTIFY, Some(1)), || 0, m), Some(0));
+                });
+            }
+        });
+        for (vm, peer) in [(a, b), (b, a)] {
+            assert_eq!((used(vm, 0), used(vm, 1)), (start + 8, start + 8));
+            let io = vm.devices.io.lock();
+            for seq in start..start + 8 {
+                let mut bytes = [0; 60];
+                assert!(io.ram.read(buffer(vm, 0, seq) + HEADER as u64, &mut bytes));
+                let mut expected = [seq as u8; 60];
+                expected[1] = peer.slot as u8;
+                assert_eq!(bytes, expected);
+            }
+            drop(io);
+            reg(f, vm, ACK, Some(3));
+        }
+    }
+    for vm in [a, b] {
+        let s = snapshot(f, vm);
+        assert_eq!((s.tx, s.rx, s.dropped, s.queued), (65, 65, 0, 0));
+    }
+    let mut monitor = crate::monitor::Monitor::new();
+    f.runtime.board.input.lock().extend(b"vm status sender\n");
+    let status = super::uart_capture::host_output(|| monitor.poll(&f.runtime));
+    assert!(status.lines().any(|s|s=="VM 5 net-lease 2:0 up=true tx=65 rx=65 dropped=0 full=0 down=0 queued=0"),"{status}");
+}
 fn reg(f: &Fixture, vm: &Vm<Arch>, addr: usize, write: Option<usize>) -> usize {
     vm.devices
         .access(access(addr, write), || 0, &f.runtime.manager)

@@ -11,6 +11,36 @@ pub const MAX_BOOT_VMS: usize = 4;
 #[deprecated(note = "use MAX_BOOT_VMS for the manifest; runtime capacity is board-specific")]
 pub const MAX_VMS: usize = MAX_BOOT_VMS;
 pub const MAX_DISKS: usize = 4;
+/// Runtime copied Ethernet channels. Each has exactly two independently leased sides.
+pub const MAX_NET_LEASES: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetLease {
+    pub channel: u8,
+    pub side: u8,
+}
+
+impl NetLease {
+    pub const fn new(channel: u8, side: u8) -> Option<Self> {
+        let lease = Self { channel, side };
+        if lease.is_valid() { Some(lease) } else { None }
+    }
+
+    pub const fn is_valid(self) -> bool {
+        (self.channel as usize) < MAX_NET_LEASES && self.side < 2
+    }
+}
+
+impl core::str::FromStr for NetLease {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Error> {
+        let &[channel @ b'0'..=b'9', b':', side @ b'0'..=b'9'] = s.as_bytes() else {
+            return Err(Error::Network);
+        };
+        Self::new(channel - b'0', side - b'0').ok_or(Error::Network)
+    }
+}
 /// Dense native owner indices, not firmware hart IDs or guest vCPU indices.
 /// RV64 tracks resident translations and IMSIC ownership in one native word.
 pub const MAX_HOST_CPUS: u8 = 64;
@@ -99,6 +129,8 @@ pub struct VmConfig {
     pub writable: bool,
     /// Explicit reciprocal point-to-point partner slot, never a guest address.
     pub net_peer: Option<u8>,
+    /// Explicit runtime child admission only. Boot manifests cannot encode a lease.
+    pub net_lease: Option<NetLease>,
     /// Exclusive native NIC. The board currently has one fixed DMA pool; it
     /// cannot be shared with another VM or combined with a paired endpoint.
     pub net_uplink: bool,

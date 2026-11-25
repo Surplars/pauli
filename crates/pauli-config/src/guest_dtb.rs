@@ -131,7 +131,7 @@ fn render(
     if vm.disk.is_some() {
         virtio(&mut f, layout.block, layout.block_irq, vm.aia)?;
     }
-    if vm.net_peer.is_some() || vm.net_uplink {
+    if vm.has_net() {
         virtio(&mut f, layout.net, layout.net_irq, vm.aia)?;
     }
     if control_events {

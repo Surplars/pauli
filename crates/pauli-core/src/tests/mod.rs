@@ -15,6 +15,7 @@ mod io_clock;
 mod management;
 mod model;
 mod model_cpu;
+mod net_leases;
 mod net_peer;
 mod placement;
 mod provision;

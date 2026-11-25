@@ -34,8 +34,22 @@ enum Phase {
 }
 #[derive(Clone, Copy)]
 struct Slot {
-    work: Work,
+    channel: usize,
+    generation: u64,
+    source: u32,
+    request: Call,
     phase: Phase,
+}
+impl Slot {
+    // The array position is already the ticket index. Store it only in tickets
+    // handed out to callers, and reconstruct it when checking a returned ticket.
+    fn ticket(&self, index: usize) -> Ticket {
+        Ticket {
+            channel: self.channel,
+            index,
+            generation: self.generation,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -76,7 +90,7 @@ impl Queue {
             .slots
             .iter()
             .flatten()
-            .any(|slot| slot.work.ticket.channel == channel)
+            .any(|slot| slot.channel == channel)
         {
             return Err(Error::Busy);
         }
@@ -86,19 +100,15 @@ impl Queue {
             .position(Option::is_none)
             .ok_or(Error::Exhausted)?;
         self.generation = self.generation.checked_add(1).ok_or(Error::Exhausted)?;
-        let ticket = Ticket {
+        let slot = Slot {
             channel,
-            index,
             generation: self.generation,
-        };
-        self.slots[index] = Some(Slot {
-            work: Work {
-                ticket,
-                source,
-                request: request.into(),
-            },
+            source,
+            request: request.into(),
             phase: Phase::Queued,
-        });
+        };
+        let ticket = slot.ticket(index);
+        self.slots[index] = Some(slot);
         Ok(ticket)
     }
     pub fn has_work(&self) -> bool {
@@ -116,14 +126,18 @@ impl Queue {
             {
                 slot.phase = Phase::Executing;
                 self.next = (index + 1) % MAX_PENDING;
-                return Some(slot.work);
+                return Some(Work {
+                    ticket: slot.ticket(index),
+                    source: slot.source,
+                    request: slot.request,
+                });
             }
         }
         None
     }
     pub fn complete(&mut self, work: Work, result: Return) -> bool {
         let Some(slot) = self.slots[work.ticket.index].as_mut().filter(|slot| {
-            slot.work.ticket == work.ticket && matches!(slot.phase, Phase::Executing)
+            slot.ticket(work.ticket.index) == work.ticket && matches!(slot.phase, Phase::Executing)
         }) else {
             return false;
         };
@@ -137,12 +151,12 @@ impl Queue {
     pub fn poll_operation(&mut self, ticket: Ticket) -> (Poll, Option<crate::Operation>) {
         let Some(slot) = self.slots[ticket.index]
             .as_ref()
-            .filter(|slot| slot.work.ticket == ticket)
+            .filter(|slot| slot.ticket(ticket.index) == ticket)
         else {
             return (Poll::Cancelled, None);
         };
         if let Phase::Done(result) = slot.phase {
-            let operation = slot.work.request.vm_operation();
+            let operation = slot.request.vm_operation();
             self.slots[ticket.index] = None;
             (Poll::Complete(result), operation)
         } else {
@@ -150,7 +164,7 @@ impl Queue {
         }
     }
     pub fn cancel(&mut self, ticket: Ticket) {
-        if self.slots[ticket.index].is_some_and(|slot| slot.work.ticket == ticket) {
+        if self.slots[ticket.index].is_some_and(|slot| slot.ticket(ticket.index) == ticket) {
             self.slots[ticket.index] = None;
         }
     }

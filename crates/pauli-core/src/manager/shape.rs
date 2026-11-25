@@ -20,6 +20,7 @@ pub(super) fn config(
     let mut child = source
         .renamed(spec.name.as_str())
         .map_err(|_| HvError::InvalidConfig)?;
+    child.net_lease = spec.net_lease;
     if let Some(cpus) = spec.shape.vcpus {
         child.vcpus = cpus.get();
         if let CpuAffinity::Physical(ref mut owners) = child.cpu_affinity {
@@ -33,7 +34,7 @@ pub(super) fn config(
     if let Some(mib) = spec.shape.memory_mib {
         child.memory_size = u64::from(mib.get()) << 20;
     }
-    if spec.shape != Default::default() {
+    if spec.shape != Default::default() || child.net_lease.is_some() {
         child
             .validate_guest_geometry()
             .map_err(|_| HvError::InvalidConfig)?;

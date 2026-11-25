@@ -171,7 +171,7 @@ fn wire_rejects_reserved_fields_and_unused_bytes_for_every_payload_length() {
 
 #[test]
 fn explicit_mail_grants_confer_only_send_and_receive() {
-    assert_eq!((Rights::MAIL.0, Rights::ALL.0), (4096, 15));
+    assert_eq!((Rights::MAIL.bits(), Rights::ALL.bits()), (4096, 15));
     assert_eq!(Rights::parse("mail"), Some(Rights::MAIL));
     assert_eq!(
         Rights::parse("mail,log"),

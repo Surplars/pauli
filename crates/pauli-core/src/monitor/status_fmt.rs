@@ -138,7 +138,7 @@ impl Monitor {
                 continue;
             }
             let state = vm.lifecycle.state();
-            if vm.config.net_peer.is_some() {
+            if vm.config.net_peer.is_some() || vm.config.net_lease.is_some() {
                 let snapshot = vm
                     .devices
                     .io
@@ -147,17 +147,19 @@ impl Monitor {
                     .as_ref()
                     .and_then(|net| net.peer_snapshot(runtime.manager.link()));
                 if let Some(s) = snapshot {
-                    self.terminal.output.host(format_args!(
-                        "VM {} peer-net up={} tx={} rx={} dropped={} full={} down={} queued={}\n",
-                        vm.slot + 1,
-                        s.up,
-                        s.tx,
-                        s.rx,
-                        s.dropped,
-                        s.full,
-                        s.down,
-                        s.queued
-                    ));
+                    let mut report =
+                        |kind: core::fmt::Arguments<'_>| {
+                            self.terminal.output.host(format_args!(
+                            "VM {} {kind} up={} tx={} rx={} dropped={} full={} down={} queued={}\n",
+                            vm.slot + 1, s.up, s.tx, s.rx, s.dropped, s.full, s.down, s.queued
+                        ));
+                        };
+                    match vm.config.net_lease {
+                        Some(lease) => {
+                            report(format_args!("net-lease {}:{}", lease.channel, lease.side))
+                        }
+                        None => report(format_args!("peer-net")),
+                    }
                 }
             }
             self.report_faults(vm.slot + 1, vm.faults(), vm.join_fault());

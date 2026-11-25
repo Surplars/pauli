@@ -7,6 +7,7 @@ use crate::{
     HvError, Result,
     arch::{ArchVcpu, Stage2Space},
     board::{Board, Payload, VmResources},
+    manager::leases::LeaseHandle,
 };
 use pauli_hal::sync::SpinLock;
 impl<A: HvArch> Vm<A> {
@@ -32,6 +33,7 @@ impl<A: HvArch> Vm<A> {
             links,
             now,
             resources,
+            None,
         )
     }
     pub(crate) fn build<B: Board>(
@@ -44,6 +46,7 @@ impl<A: HvArch> Vm<A> {
         links: &'static DeviceLinks,
         now: u64,
         mut resources: VmResources,
+        lease: Option<LeaseHandle>,
     ) -> Result<Self> {
         let info = board.info();
         let quantum =
@@ -111,6 +114,7 @@ impl<A: HvArch> Vm<A> {
             &mut resources.arena,
             links,
             now,
+            lease,
         )?;
         Ok(Self {
             config,

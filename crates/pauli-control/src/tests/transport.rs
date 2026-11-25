@@ -282,6 +282,37 @@ fn transitions() {
     }
 }
 #[test]
+fn queued_lease_survives_dispatch_without_growing_the_rv64_boot_queue() {
+    // The RV64 boot image has reserved 1424 bytes for all 16 pending calls.
+    #[cfg(target_pointer_width = "64")]
+    assert!(core::mem::size_of::<Queue>() <= 1424);
+    let mut queue = Queue::new();
+    let mut spec: ChildSpec = ChildName::new("endpoint").unwrap().into();
+    spec.net_lease = NetLease::new(2, 1);
+    let operation = Operation::Create(spec);
+    let request = Request {
+        vm: VmId(7),
+        epoch: 4,
+        operation,
+    };
+    let old = queue.submit(usize::MAX, 18, request).unwrap();
+    let stale_work = queue.take().unwrap();
+    queue.cancel(old);
+    let fresh = queue.submit(usize::MAX, 19, request).unwrap();
+    let work = queue.take().unwrap();
+    let result = abi::Return { error: 0, value: 7 };
+    assert_eq!(work.source, 19);
+    assert_eq!(work.ticket, fresh);
+    assert_eq!(work.request.vm_operation(), Some(operation));
+    assert!(!queue.complete(stale_work, result));
+    assert!(queue.complete(work, result));
+    assert_eq!(
+        queue.poll_operation(fresh),
+        (Poll::Complete(result), Some(operation))
+    );
+}
+
+#[test]
 fn concurrent() {
     const PRODUCERS: usize = 4;
     const ROUNDS: usize = 256;
@@ -348,14 +379,14 @@ fn volume_create_requires_canonical_slot_and_exact_slot_authority() {
         let call = |op, word| abi::decode([1, op, 2, word, name, 0]);
         let create = call(abi::CREATE_DISK, selector | 9).unwrap().operation;
         let required = Rights::CREATE.union(Rights::disk(slot));
-        assert_eq!(create.right(), required);
+        assert_eq!(create.right(), Ok(required));
         assert_eq!(Rights::parse(&format!("create,disk{n}")), Some(required));
         assert_eq!(
             call(abi::CREATE_DISK, selector | (2 << 32) | 9)
                 .unwrap()
                 .operation
                 .right(),
-            required.union(Rights::SHAPE)
+            Ok(required.union(Rights::SHAPE))
         );
         for old in [3, abi::CREATE_SHAPED] {
             assert_eq!(call(old, selector | 9), Err(abi::INVALID_PARAM));
@@ -369,5 +400,39 @@ fn volume_create_requires_canonical_slot_and_exact_slot_authority() {
     }
     for invalid in ["disk", "disk00", "disk4", "disk/"] {
         assert!(Rights::parse(invalid).is_none());
+    }
+}
+
+#[test]
+fn lease_permissions_are_disjoint_and_all_scalar_creates_are_networkless() {
+    let mut mask = Rights::parse(
+        "inspect,start,stop,console,create,destroy,shape,log,mail,disk0,disk1,disk2,disk3",
+    )
+    .unwrap();
+    for channel in 0..pauli_config::MAX_NET_LEASES as u8 {
+        for side in 0..2 {
+            let lease = NetLease::new(channel, side).unwrap();
+            let right = Rights::net_lease(lease).unwrap();
+            assert!(!mask.contains(right));
+            assert_eq!(Rights::parse(&format!("net{channel}:{side}")), Some(right));
+            mask = mask.union(right);
+        }
+    }
+    for invalid in [
+        "net", "net3", "net4:0", "net0:2", "net00:1", "net+1:0", "net1:0:", "net0:１",
+    ] {
+        assert_eq!(Rights::parse(invalid), None);
+    }
+    let name = u64::from_le_bytes(*b"child\0\0\0");
+    for (op, word) in [
+        (3, 9),
+        (abi::CREATE_SHAPED, 9 | 1 << 32),
+        (abi::CREATE_DISK, 9 | 1 << 56),
+    ] {
+        let Operation::Create(spec) = abi::decode([1, op, 2, word, name, 0]).unwrap().operation
+        else {
+            panic!()
+        };
+        assert_eq!(spec.net_lease, None);
     }
 }

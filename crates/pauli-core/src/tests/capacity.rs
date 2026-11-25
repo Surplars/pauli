@@ -190,12 +190,16 @@ fn a_networkless_domain_never_truncates_its_id_to_a_peer_mac() {
     let link = SpinLock::new(Link::new());
     let mut cfg = VmConfig::new("diskless").unwrap();
     for slot in [255, 65_535] {
-        assert!(Net::bind(slot, 1, &cfg, &link, None).unwrap().is_none());
+        assert!(
+            Net::bind(slot, 1, &cfg, &link, None, None)
+                .unwrap()
+                .is_none()
+        );
     }
     cfg.net_peer = Some(0);
     assert!(matches!(
-        Net::bind(255, 1, &cfg, &link, None),
+        Net::bind(255, 1, &cfg, &link, None, None),
         Err(crate::HvError::InvalidConfig)
     ));
-    assert!(Net::bind(1, 1, &cfg, &link, None).unwrap().is_some());
+    assert!(Net::bind(1, 1, &cfg, &link, None, None).unwrap().is_some());
 }

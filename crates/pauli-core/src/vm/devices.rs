@@ -8,7 +8,7 @@ use crate::{
     backends::{block::Block, console::Console, mailbox::Mailbox, net::Net, rtc::Rtc},
     board::Board,
     bus::{DeviceId, MmioBus},
-    manager::VmManager,
+    manager::{VmManager, leases::LeaseHandle},
     memory::{Arena, GuestRam},
     trace::Tracer,
 };
@@ -87,6 +87,7 @@ impl<I: VirtualIrqChip> VmDevices<I> {
         arena: &mut Arena,
         links: &'static DeviceLinks,
         now: u64,
+        lease: Option<LeaseHandle>,
     ) -> Result<Self> {
         let hz = board.info().timebase_hz;
         let layout = board.layout();
@@ -115,7 +116,7 @@ impl<I: VirtualIrqChip> VmDevices<I> {
         let chip = I::create_configured(irq_config)?;
         // Binding the peer link is the final fallible step: no failed VM can
         // leave behind an endpoint that a later peer would see as active.
-        let net = Net::bind(slot, epoch, config, &links.peer, native)?;
+        let net = Net::bind(slot, epoch, config, &links.peer, native, lease)?;
         Ok(Self {
             io: SpinLock::new(IoState {
                 ram,
@@ -418,7 +419,7 @@ fn create_bus(
     if config.disk.is_some() {
         bus.register(layout.block, DeviceId::Block)?;
     }
-    if config.net_peer.is_some() || config.net_uplink {
+    if config.has_net() {
         bus.register(layout.net, DeviceId::Net)?;
     }
     match controller {

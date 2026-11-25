@@ -10,7 +10,7 @@ impl Monitor {
     ) -> Result<()> {
         match command {
             Command::Empty => {}
-            Command::Help => self.terminal.output.host(format_args!("vm list/status [name]; vm capacity; vm disks\nvm quota <manager> [<children> <vcpus> <MiB>|clear]\nvm create <template> <name> [--vcpus N] [--memory-mib N] [--disk N]; vm destroy <name>\nvm start <name> [--attach]\nvm attach/stop <name>; vm detach\nvm grant <source> <target> <inspect,start,stop,console,log,mail,create,shape,diskN,destroy|all>\nvm revoke <source> <target>; shutdown\nCtrl+] detaches without stopping the VM\n")),
+            Command::Help => self.terminal.output.host(format_args!("vm list/status [name]; vm capacity; vm disks\nvm quota <manager> [<children> <vcpus> <MiB>|clear]\nvm create <template> <name> [--vcpus N] [--memory-mib N] [--disk N] [--net-lease C:S]; vm destroy <name>\nvm start <name> [--attach]\nvm attach/stop <name>; vm detach\nvm grant <source> <target> <inspect,start,stop,console,log,mail,create,shape,diskN,netC:S,destroy|all>\nvm revoke <source> <target>; shutdown\nCtrl+] detaches without stopping the VM\n")),
             Command::Disks => self.disks(runtime),
             Command::Capacity => {
                 self.terminal.output.host(format_args!(

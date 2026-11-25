@@ -191,6 +191,9 @@ impl BootConfig {
     }
 
     fn validate_network(&self, index: usize, vm: &VmConfig) -> Result<(), Error> {
+        if vm.net_lease.is_some() {
+            return Err(Error::Network);
+        }
         if let Some(peer) = vm.net_peer {
             if vm.net_uplink
                 || usize::from(peer) == index

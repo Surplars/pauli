@@ -29,6 +29,7 @@ impl VmConfig {
             disk: None,
             writable: false,
             net_peer: None,
+            net_lease: None,
             net_uplink: false,
             stop_on_reset: false,
             aia: false,
@@ -54,12 +55,24 @@ impl VmConfig {
             autostart: false,
             host_stats: false,
             control_events: false,
+            net_lease: None,
             ..*self
         })
     }
+    pub const fn has_net(&self) -> bool {
+        self.net_peer.is_some() || self.net_uplink || self.net_lease.is_some()
+    }
+
     /// The manifest and runtime requests use the same fit rules before computing
     /// offsets. Linux's loaded kernel (including BSS), initrd and DTB may not alias.
     pub fn validate_guest_geometry(&self) -> Result<(), Error> {
+        if self
+            .net_lease
+            .is_some_and(|lease| !lease.is_valid() || self.net_peer.is_some() || self.net_uplink)
+            || (self.net_peer.is_some() && self.net_uplink)
+        {
+            return Err(Error::Network);
+        }
         if let Some(layout) = self.firmware {
             let dtb = MAX_GUEST_DTB as u64;
             if !(dtb + 2 * FIRMWARE_PAGE..=MAX_FIRMWARE_RAM).contains(&self.memory_size)

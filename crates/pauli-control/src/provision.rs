@@ -30,6 +30,7 @@ pub struct ChildSpec {
     pub name: ChildName,
     pub shape: Shape,
     pub disk: Option<DiskSlot>,
+    pub net_lease: Option<NetLease>,
 }
 impl From<ChildName> for ChildSpec {
     fn from(name: ChildName) -> Self {
@@ -37,6 +38,7 @@ impl From<ChildName> for ChildSpec {
             name,
             shape: Shape::default(),
             disk: None,
+            net_lease: None,
         }
     }
 }

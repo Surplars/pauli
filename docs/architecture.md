@@ -304,3 +304,12 @@ is handed off. The boot hart never consumes a second stack.
 A child is charged to its authenticated sponsor until destruction. Publishing
 charges and releasing them use the same live set as dispatch, so a failed build,
 cold restart or rejected teardown cannot lose a charge.
+
+Dynamic copied network channels follow the same sponsorship rule. A published
+child owns one side until joined destruction. The first side allocates the
+host frame store from the domain pool. Children of the same sponsor can hold
+the opposite sides and share one charge. The final release erases the extent
+before returning it to the allocator. Notifications contain slot and
+incarnation identifiers, so they can outlive a send without pinning the
+channel allocation or carrying a guest address.
+[Dynamic endpoint leases](inter-vm-transport.md#leases-for-dynamic-guests)

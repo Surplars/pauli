@@ -5,7 +5,7 @@ use super::{HvArch, HvError, Result, VmManager};
 use pauli_config::VmConfig;
 use pauli_control::VmId;
 
-/// Allocated topology and exact guest RAM, not runnable time or host metadata.
+/// Allocated topology, exact guest RAM and the page-rounded charge for each leased channel.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct Budget {
     guests: u32,
@@ -87,20 +87,26 @@ mod tests {
 impl<A: HvArch> VmManager<A> {
     /// Derive the charge from published children. No rollback ledger can drift
     /// when a build fails, a CPU is pinned, or another authorized caller destroys.
-    fn usage(&self, sponsor: VmId) -> Budget {
+    fn usage(&self, sponsor: VmId) -> (Budget, u8) {
         let mut used = Budget::default();
+        let mut channels = 0u8;
         for vm in self.vms().filter(|vm| vm.sponsor == Some(sponsor)) {
             used.charge(&vm.config);
+            if let Some(lease) = vm.config.net_lease {
+                channels |= 1u8 << lease.channel;
+            }
         }
-        used
+        used.memory_bytes +=
+            u64::from(channels.count_ones()) * super::leases::LeaseHandle::BYTES as u64;
+        (used, channels)
     }
     pub(crate) fn budget(&self, slot: usize) -> Result<(Budget, Option<Budget>)> {
         let limit = *self.vm(slot)?.quota.lock();
-        Ok((self.usage(VmId(slot as u32 + 1)), limit))
+        Ok((self.usage(VmId(slot as u32 + 1)).0, limit))
     }
     pub(crate) fn set_budget(&self, slot: usize, limit: Option<Budget>) -> Result<()> {
         let vm = self.vm(slot)?;
-        if limit.is_some_and(|cap| !self.usage(VmId(slot as u32 + 1)).fits(cap)) {
+        if limit.is_some_and(|cap| !self.usage(VmId(slot as u32 + 1)).0.fits(cap)) {
             return Err(HvError::Busy);
         }
         *vm.quota.lock() = limit;
@@ -111,8 +117,14 @@ impl<A: HvArch> VmManager<A> {
         let slot = id.0.checked_sub(1).ok_or(HvError::NotFound)? as usize;
         let limit = *self.vm(slot)?.quota.lock();
         let Some(limit) = limit else { return Ok(()) };
-        let mut used = self.usage(id);
+        let (mut used, channels) = self.usage(id);
         used.charge(config);
+        if config
+            .net_lease
+            .is_some_and(|lease| channels & (1u8 << lease.channel) == 0)
+        {
+            used.memory_bytes += super::leases::LeaseHandle::BYTES as u64;
+        }
         if used.fits(limit) {
             Ok(())
         } else {
