@@ -35,6 +35,8 @@ pub(super) struct External<'a> {
     pub image: PhysRange,
     pub initrd: Option<PhysRange>,
     pub ram: PhysRange,
+    /// Private host frames for dynamic domains, separate from the boot guests' RAM.
+    pub pool: Option<PhysRange>,
     pub bootargs: &'a str,
     /// Selects the management boot topology, not an RPC capability.
     pub manager: bool,

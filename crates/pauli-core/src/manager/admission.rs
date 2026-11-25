@@ -16,8 +16,10 @@ impl core::fmt::Display for Budget {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let (size, unit) = if self.memory_bytes.is_multiple_of(1 << 20) {
             (self.memory_bytes >> 20, "MiB")
+        } else if self.memory_bytes.is_multiple_of(1 << 10) {
+            (self.memory_bytes >> 10, "KiB")
         } else {
-            (self.memory_bytes >> 10, "KiB") // Every allocation is page-aligned.
+            (self.memory_bytes, "B")
         };
         write!(
             f,
@@ -27,12 +29,15 @@ impl core::fmt::Display for Budget {
     }
 }
 impl Budget {
-    pub(crate) fn from_mib(guests: u32, vcpus: u32, memory_mib: u32) -> Self {
+    pub const fn from_bytes(guests: u32, vcpus: u64, memory_bytes: u64) -> Self {
         Self {
             guests,
-            vcpus: vcpus.into(),
-            memory_bytes: u64::from(memory_mib) << 20,
+            vcpus,
+            memory_bytes,
         }
+    }
+    pub(crate) fn from_mib(guests: u32, vcpus: u32, memory_mib: u32) -> Self {
+        Self::from_bytes(guests, vcpus.into(), u64::from(memory_mib) << 20)
     }
     fn charge(&mut self, config: &VmConfig) {
         // One ID belongs to the sponsor. Each other u32 ID charges at most
@@ -51,6 +56,20 @@ impl Budget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_limits_keep_full_precision() {
+        const EXACT: Budget = Budget::from_bytes(8, (1 << 32) + 8, (512 << 10) + 1);
+        assert_eq!(EXACT.guests, 8);
+        assert_eq!(EXACT.vcpus, (1 << 32) + 8);
+        assert_eq!(EXACT.memory_bytes, 524289);
+        assert_eq!(
+            std::format!("{EXACT}"),
+            "guests=8 vcpus=4294967304 memory=524289B"
+        );
+        assert!(!EXACT.fits(Budget::from_bytes(8, EXACT.vcpus, EXACT.memory_bytes - 1)));
+        assert_eq!(Budget::from_mib(8, 8, 1), Budget::from_bytes(8, 8, 1 << 20));
+    }
 
     #[test]
     fn admission_above_the_largest_cli_limit_does_not_wrap() {

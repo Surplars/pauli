@@ -1,6 +1,6 @@
 //! Exercise the same role, staging and one-shot assignment paths as HS boot.
 use super::*;
-use crate::assignment::{Arenas, Slots};
+use crate::assignment::{Arenas, Slots, bind_pool};
 use core::mem::MaybeUninit;
 
 #[test]
@@ -151,22 +151,31 @@ fn slots_lend_only_their_own_restart_images_ram_and_arena() {
     let src: &'static Sources = Box::leak(backing);
     let image = range(src.image.as_ptr() as usize, PAGE_SIZE);
     let archive = range(src.archive.as_ptr() as usize, 31);
-    // An actual aligned foreign loan, at the smallest valid Linux geometry.
-    let layout = std::alloc::Layout::from_size_align(66 << 20, ALIGN as usize).unwrap();
+    // The 66 MiB boot loan and minimum-sized pool have a two MiB gap on each side of the pool.
+    let layout = std::alloc::Layout::from_size_align(72 << 20, ALIGN as usize).unwrap();
     // SAFETY: this allocation's exact layout is retained until both iterations finish.
     let base = unsafe { std::alloc::alloc(layout) };
     assert!(!base.is_null());
-    for &manager in if cfg!(feature = "guest-control") {
-        &[false, true][..]
+    let pool_range = range(base as usize + (68 << 20), 2 << 20);
+    // SAFETY: both guard pages are inside our allocation and outside all loans.
+    unsafe {
+        (pool_range.base() as *mut u8)
+            .sub(PAGE_SIZE)
+            .write_bytes(0xa5, PAGE_SIZE);
+        (pool_range.end() as *mut u8).write_bytes(0x5a, PAGE_SIZE);
+    }
+    for &(manager, has_pool) in if cfg!(feature = "guest-control") {
+        &[(false, false), (true, false), (true, true)][..]
     } else {
-        &[false][..]
+        &[(false, false)][..]
     } {
         let input = External {
             manager,
             aia: false,
             image,
             initrd: Some(archive),
-            ram: range(base as usize, layout.size()),
+            ram: range(base as usize, 66 << 20),
+            pool: has_pool.then_some(pool_range),
             bootargs: "private-linux-arg",
         };
         let trees = Box::leak(Box::new([[0; MAX_GUEST_DTB]; 2]));
@@ -178,6 +187,9 @@ fn slots_lend_only_their_own_restart_images_ram_and_arena() {
         // SAFETY: no other handle or reference to the allocated RAM exists;
         // the stage above only inspected its geometry, never its bytes.
         let mut slots = unsafe { Slots::bind(&plan, images, arenas) }.unwrap();
+        // SAFETY: this separate allocation range is exclusively ours until pool drops.
+        let pool = unsafe { bind_pool(input.pool) }.unwrap();
+        assert_eq!(pool.is_some(), has_pool);
         assert!(slots.take(2).is_err());
         let peer = slots.take(1);
         let mut linux = slots.take(0).unwrap();
@@ -191,6 +203,8 @@ fn slots_lend_only_their_own_restart_images_ram_and_arena() {
             let mut peer = peer.unwrap();
             assert_eq!(peer.ram.host_range().base(), linux.ram.host_range().end());
             assert_eq!(peer.ram.len(), 64 << 10);
+            assert!(!pool_range.overlaps(linux.ram.host_range()));
+            assert!(!pool_range.overlaps(peer.ram.host_range()));
             assert_eq!(peer.images.kernel.as_ptr(), peer_code.as_ptr());
             assert!(peer.images.initrd.is_empty());
             assert_eq!(
@@ -204,6 +218,13 @@ fn slots_lend_only_their_own_restart_images_ram_and_arena() {
         } else {
             assert!(peer.is_err());
         }
+    }
+    // SAFETY: every pool and guest handle is gone; the guard pages remain initialized.
+    unsafe {
+        let left =
+            core::slice::from_raw_parts((pool_range.base() - PAGE_SIZE) as *const u8, PAGE_SIZE);
+        let right = core::slice::from_raw_parts(pool_range.end() as *const u8, PAGE_SIZE);
+        assert!(left.iter().all(|&b| b == 0xa5) && right.iter().all(|&b| b == 0x5a));
     }
     // SAFETY: all GuestRam handles have gone out of scope with their iteration.
     unsafe { std::alloc::dealloc(base, layout) };

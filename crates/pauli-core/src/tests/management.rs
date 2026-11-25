@@ -14,6 +14,8 @@ use pauli_control::{Backend, Caller, Error, Operation, Request, Rights, Service,
 #[cfg(feature = "guest-control")]
 mod boot_grant;
 #[cfg(feature = "guest-control")]
+mod boot_quota;
+#[cfg(feature = "guest-control")]
 mod mail;
 
 #[test]

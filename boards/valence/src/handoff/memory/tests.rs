@@ -4,6 +4,7 @@ use super::*;
 use crate::handoff::tests::blob::Tokens;
 
 type Props = Vec<(&'static str, Vec<u8>)>;
+mod pool;
 
 fn tuple(a: usize, b: usize) -> Vec<u8> {
     [(a as u64).to_be_bytes(), (b as u64).to_be_bytes()].concat()
@@ -27,6 +28,8 @@ struct Fixture {
     duplicate_chosen: bool,
     nodes: Vec<Props>,
     ddr: Vec<u8>,
+    ddr_name: &'static str,
+    ddr_extra: Props,
     reserve_map: Vec<u8>,
 }
 impl Default for Fixture {
@@ -36,6 +39,8 @@ impl Default for Fixture {
             duplicate_chosen: false,
             nodes: vec![ram_node()],
             ddr: tuple(0x8000_0000, 1usize << 32),
+            ddr_name: "memory@80000000",
+            ddr_extra: vec![],
             reserve_map: vec![],
         }
     }
@@ -51,13 +56,12 @@ impl Fixture {
             w.begin("chosen", &self.chosen);
             w.tag(2);
         }
-        w.begin(
-            "memory@80000000",
-            &vec![
-                ("device_type", b"memory\0".to_vec()),
-                ("reg", self.ddr.clone()),
-            ],
-        );
+        let mut ddr = vec![
+            ("device_type", b"memory\0".to_vec()),
+            ("reg", self.ddr.clone()),
+        ];
+        ddr.extend(self.ddr_extra.clone());
+        w.begin(self.ddr_name, &ddr);
         w.tag(2);
         let mut bus = cells();
         bus.push(("ranges", vec![]));

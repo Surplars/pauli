@@ -6,9 +6,22 @@ use pauli_config::BootConfig;
 use pauli_core::{
     HvError, Result,
     board::{BootImages, VmResources},
-    memory::{Arena, GuestRam},
+    memory::{
+        Arena, GuestRam,
+        pool::{DomainPool, FramePool},
+    },
 };
 use pauli_hal::mem::PhysRange;
+
+/// # Safety
+/// The complete range must be an exclusive, writable, identity-mapped loan
+/// retained for the lifetime of the pool, disjoint from all other board owners.
+pub(super) unsafe fn bind_pool(range: Option<PhysRange>) -> Result<Option<DomainPool>> {
+    let Some(range) = range else { return Ok(None) };
+    let frames = FramePool::new(range.base(), range.size()).map_err(|_| HvError::InvalidMemory)?;
+    // SAFETY: the boot allocator contains exactly the dedicated no-map loan.
+    Ok(Some(unsafe { DomainPool::from_boot(frames) }))
+}
 
 pub(super) type Images = [Option<BootImages>; 2];
 // A 64 KiB stride preserves the first arena's linker-provided 16 KiB root

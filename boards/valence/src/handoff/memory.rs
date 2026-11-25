@@ -1,7 +1,7 @@
 //! Physical grants for the embedded probe or one externally loaded Linux guest.
 //! Only the boot hart walks the immutable native DTB. No physical pointers here:
 //! an address becomes usable only when the fixed layout, DDR and reservations agree.
-use super::{External, PhysRange, RAM_BASE, RAM_BYTES, node};
+use super::{External, HANDOFF_END, HANDOFF_START, PhysRange, RAM_BASE, RAM_BYTES, node};
 use pauli_hal::fdt::{Error, Fdt, Node, Result};
 
 const IMAGE_BASE: usize = 0x8900_0000;
@@ -13,6 +13,9 @@ const GUEST_RAM_SIZE: usize = 512 << 20;
 const GIGA: usize = 1 << 30;
 const ALIGNED_RAM_MIN: usize = 0xc000_0000;
 const GUEST_COMPAT: &str = "openion,wave8-guest-ram";
+const POOL_COMPAT: &str = "openion,wave8-domain-pool";
+const DDR_BASE: usize = 0x8000_0000;
+const POOL_ALIGN: usize = 2 << 20;
 const DEFAULT_ARGS: &str = "console=ttyS0,115200 rdinit=/init";
 const MAX_ARGS: usize = 2048;
 
@@ -50,10 +53,35 @@ fn each_reg(n: &Node<'_>, mut visit: impl FnMut(PhysRange) -> Result<()>) -> Res
     Ok(())
 }
 
-// Find the exclusive loan first: the RAM address is supplied by the native
-// reservation and must be known before checking any bank or other reservation.
-fn guest_ram(tree: Fdt<'_>) -> Result<Option<PhysRange>> {
-    let mut ram = None;
+#[derive(Default)]
+struct Grants {
+    ram: Option<PhysRange>,
+    pool: Option<PhysRange>,
+}
+
+fn validate_pool(pool: PhysRange) -> Result<()> {
+    if pool.base() < DDR_BASE
+        || !pool.base().is_multiple_of(POOL_ALIGN)
+        || !(POOL_ALIGN..=GIGA).contains(&pool.size())
+        || !pool.size().is_multiple_of(POOL_ALIGN)
+        || pool.end() > 1usize << 56
+    {
+        return Err(Error::Bounds);
+    }
+    // The lowest DDR block contains live OpenSBI at 0x80100000. The DTB may
+    // occupy any subrange of the 2 MiB handoff window, even without a reserve entry.
+    for (base, end) in [(DDR_BASE, RAM_BASE), (HANDOFF_START, HANDOFF_END)] {
+        if pool.overlaps(PhysRange::new(base, end - base).map_err(|_| Error::Bounds)?) {
+            return Err(Error::Reservation);
+        }
+    }
+    Ok(())
+}
+
+// Collect both explicit loans first, independent of sibling and DDR-bank order.
+fn grants(tree: Fdt<'_>) -> Result<Grants> {
+    let mut loans = Grants::default();
+    let mut saw_pool = false;
     let mut reserved = false;
     let mut saw_reserved = false;
     for n in tree.nodes() {
@@ -63,30 +91,62 @@ fn guest_ram(tree: Fdt<'_>) -> Result<Option<PhysRange>> {
             if reserved && core::mem::replace(&mut saw_reserved, true) {
                 return Err(Error::Reservation);
             }
-        } else if reserved && n.depth() == 2 && n.available()? {
-            n.unique_property("compatible")?;
-            if n.compatible(GUEST_COMPAT)? {
-                if ram.is_some()
-                    || n.unique_property("no-map")? != Some(&[])
-                    || n.property("reusable")?.is_some()
+        } else if reserved && n.depth() == 2 {
+            let available = n.available()?;
+            // Disabled foreign nodes grant nothing. Still count a disabled pool
+            // declaration so a second node cannot select the pool by ordering.
+            if !available
+                && !n.property("compatible")?.is_some_and(|list| {
+                    list.split(|byte| *byte == 0)
+                        .any(|value| value == POOL_COMPAT.as_bytes())
+                })
+            {
+                continue;
+            }
+            let compatible = n.unique_property("compatible")?;
+            let pool = n.compatible(POOL_COMPAT)?;
+            let guest = n.compatible(GUEST_COMPAT)?;
+            if pool {
+                n.unique_property("status")?;
+                if core::mem::replace(&mut saw_pool, true)
+                    || compatible != Some(b"openion,wave8-domain-pool\0")
                 {
                     return Err(Error::Reservation);
                 }
-                ram = Some(reg(n.unique_property("reg")?.ok_or(Error::Reservation)?)?);
+            }
+            if !(pool || guest) || !available {
+                continue;
+            }
+            if n.unique_property("no-map")? != Some(&[]) || n.property("reusable")?.is_some() {
+                return Err(Error::Reservation);
+            }
+            let region = reg(n.unique_property("reg")?.ok_or(Error::Reservation)?)?;
+            if pool {
+                validate_pool(region)?;
+                loans.pool = Some(region);
+            } else if loans.ram.replace(region).is_some() {
+                return Err(Error::Reservation);
             }
         }
     }
-    Ok(ram)
+    Ok(loans)
 }
 
 fn external<'a>(
     chosen: &Node<'a>,
     host: PhysRange,
-    declared: Option<PhysRange>,
+    loans: &Grants,
 ) -> Result<Option<External<'a>>> {
+    let initrd_address = |name: &str| {
+        if loans.pool.is_some() {
+            chosen.unique_property(name)
+        } else {
+            chosen.property(name)
+        }
+    };
     let initrd = match (
-        chosen.property("linux,initrd-start")?,
-        chosen.property("linux,initrd-end")?,
+        initrd_address("linux,initrd-start")?,
+        initrd_address("linux,initrd-end")?,
     ) {
         (None, None) => None,
         (Some(a), Some(b)) => {
@@ -139,7 +199,7 @@ fn external<'a>(
             core::str::from_utf8(body).map_err(|_| Error::String)?
         }
     };
-    let ram = declared.ok_or(Error::Reservation)?;
+    let ram = loans.ram.ok_or(Error::Reservation)?;
     let legacy = ram.base() == GUEST_RAM_BASE && ram.size() == GUEST_RAM_SIZE;
     // Sv39x4 represents 56-bit HPAs. A manager needs a private tail beyond
     // the single Linux root leaf for its firmware service.
@@ -159,6 +219,7 @@ fn external<'a>(
         image,
         initrd,
         ram,
+        pool: loans.pool,
         bootargs,
         manager,
         aia,
@@ -167,12 +228,18 @@ fn external<'a>(
 
 pub(super) fn granted(tree: Fdt<'_>) -> Result<Option<External<'_>>> {
     let host = PhysRange::new(RAM_BASE, RAM_BYTES).map_err(|_| Error::Bounds)?;
-    let declared = guest_ram(tree)?;
+    let loans = grants(tree)?;
     let guest = match tree.find("/chosen")? {
-        Some(chosen) => external(&chosen, host, declared)?,
+        Some(chosen) => external(&chosen, host, &loans)?,
         None => None,
     };
-    if declared.is_some() && guest.is_none() {
+    if loans.pool.is_some() && !guest.is_some_and(|g| g.manager) {
+        pauli_hal::hv_error!(
+            "Wave8 domain pool requires an external guest with openion,guest-role=manager"
+        );
+        return Err(Error::Property);
+    }
+    if loans.ram.is_some() && guest.is_none() {
         return Err(Error::Reservation);
     }
     let windows = [
@@ -180,7 +247,13 @@ pub(super) fn granted(tree: Fdt<'_>) -> Result<Option<External<'_>>> {
         guest.map(|g| g.image),
         guest.and_then(|g| g.initrd),
         guest.map(|g| g.ram),
+        loans.pool,
     ];
+    if let Some(pool) = loans.pool
+        && windows[..4].iter().flatten().any(|r| r.overlaps(pool))
+    {
+        return Err(Error::Reservation);
+    }
     let mut covered = windows.map(|w| w.is_none());
     let disjoint = |region: PhysRange| {
         if windows.iter().flatten().any(|w| w.overlaps(region)) {
@@ -191,6 +264,14 @@ pub(super) fn granted(tree: Fdt<'_>) -> Result<Option<External<'_>>> {
     };
     for path in ["/", "/reserved-memory"] {
         let bus = node(tree, path)?;
+        if loans.pool.is_some() {
+            bus.unique_property("status")?;
+            bus.unique_property("#address-cells")?;
+            bus.unique_property("#size-cells")?;
+            if path != "/" {
+                bus.unique_property("ranges")?;
+            }
+        }
         if bus.u32("#address-cells")? != Some(2)
             || bus.u32("#size-cells")? != Some(2)
             || (path != "/" && bus.property("ranges")? != Some(&[]))
@@ -210,16 +291,39 @@ pub(super) fn granted(tree: Fdt<'_>) -> Result<Option<External<'_>>> {
             }
             reserved = n.name() == "reserved-memory";
             if n.text("device_type")? == Some("memory") && n.available()? {
+                let pool_bank = loans.pool.is_some() && n.name().split('@').next() == Some("memory");
+                if pool_bank {
+                    n.unique_property("device_type")?;
+                    n.unique_property("status")?;
+                }
                 each_reg(&n, |bank| {
                     for (seen, w) in covered.iter_mut().zip(windows) {
-                        *seen |= w.is_some_and(|r| bank.contains(r));
+                        if w != loans.pool || pool_bank {
+                            *seen |= w.is_some_and(|r| bank.contains(r));
+                        }
                     }
                     Ok(())
                 })?;
             }
-        } else if reserved && n.depth() == 2 && n.available()? && !n.compatible(GUEST_COMPAT)? {
-            // The sole compatible reservation was validated by guest_ram().
-            each_reg(&n, disjoint)?;
+        } else if reserved && n.depth() == 2 {
+            if n.available()? {
+                if !n.compatible(GUEST_COMPAT)?
+                    && !(loans.pool.is_some() && n.compatible(POOL_COMPAT)?)
+                {
+                    each_reg(&n, disjoint)?;
+                }
+            } else if let Some(pool) = loans.pool
+                && n.property("reg")?.is_some()
+            {
+                // A disabled fixed carveout cannot confer ownership of its bytes.
+                each_reg(&n, |r| {
+                    if r.overlaps(pool) {
+                        Err(Error::Reservation)
+                    } else {
+                        Ok(())
+                    }
+                })?;
+            }
         }
     }
     if !covered.into_iter().all(|yes| yes) {

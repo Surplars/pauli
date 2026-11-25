@@ -14,6 +14,7 @@ fn input(archive: bool) -> External<'static> {
         image: range(0x8900_0000, 7282696),
         initrd: archive.then(|| range(0x8100_0000, 0x074a970b)),
         ram: range(0xa000_0000, 512 << 20),
+        pool: None,
         bootargs: "console=ttyS0,115200 rdinit=/init",
     }
 }
@@ -264,6 +265,18 @@ fn packaged_external_guest_plan() {
         fs::read(std::env::var_os("WAVE8_EXTERNAL_DTB").expect("WAVE8_EXTERNAL_DTB")).unwrap();
     let handoff = crate::handoff::validate_blob(0, &native).unwrap();
     let grant = handoff.external.expect("external guest");
+    let native_pool = Fdt::new(&native)
+        .unwrap()
+        .nodes()
+        .map(|node| node.unwrap())
+        .find(|node| {
+            node.available().unwrap() && node.compatible("openion,wave8-domain-pool").unwrap()
+        })
+        .map(|node| node.reg().unwrap().unwrap());
+    assert_eq!(
+        grant.pool.map(|r| (r.base() as u64, r.size() as u64)),
+        native_pool
+    );
     let mut image = fs::File::open(dir.join("Image")).unwrap();
     assert_eq!(image.metadata().unwrap().len(), grant.image.size() as u64);
     let mut h = [0; HEADER_BYTES];
@@ -304,6 +317,13 @@ fn packaged_external_guest_plan() {
         )
     );
     let tree = Fdt::new(&guest_tree[..vm.dtb_size as usize]).unwrap();
+    assert!(tree.find("/reserved-memory").unwrap().is_none());
+    assert!(tree.nodes().all(|node| {
+        !node
+            .unwrap()
+            .compatible("openion,wave8-domain-pool")
+            .unwrap()
+    }));
     let imsic = tree.find("/imsics@28000000").unwrap();
     assert_eq!(imsic.is_some(), vm.aia);
     if let Some(imsic) = imsic {

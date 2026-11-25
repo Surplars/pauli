@@ -68,6 +68,11 @@ pub trait Board: Send + Sync + 'static {
     fn boot_service_for(&self, _manager_slot: usize) -> Option<usize> {
         None
     }
+    /// Initial sponsor budget for this zero-based boot slot. A budget and a
+    /// domain pool also allow its manager to clone the designated service.
+    fn boot_service_quota(&self, _manager_slot: usize) -> Option<crate::manager::Budget> {
+        None
+    }
     /// Optional residual RAM after firmware, native DMA and boot guests are reserved.
     fn domain_pool(&self) -> Option<&crate::memory::pool::DomainPool> {
         None

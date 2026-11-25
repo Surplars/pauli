@@ -1,7 +1,7 @@
 //! Wave8 single-hart HS host; physical devices are used only after FDT validation.
 //! Ownership: boot owns the S-file and UART; each boot slot gets private backing.
 //! The firmware, native handoff, immutable sources and RPU/GEM never map into VS.
-use super::assignment::{Arenas, Slots};
+use super::assignment::{Arenas, Slots, bind_pool};
 use super::handoff::{
     self, IMSIC_IDS, RAM_BASE, RAM_BYTES, S_APLIC, TIMEBASE_HZ, UART, UART_BAUD, UART_CLOCK,
     UART_IRQ,
@@ -22,6 +22,8 @@ use pauli_config::{BootConfig, GuestBoardLayout, MAX_GUEST_DTB, VmConfig};
 use pauli_core::{
     BootStorage, HvError, Result,
     board::{Board, BoardInfo, BootImages, Payload, VmResources},
+    manager::Budget,
+    memory::pool::DomainPool,
 };
 use pauli_hal::{
     addr::PAGE_SIZE,
@@ -53,6 +55,7 @@ pub struct Wave8 {
     boot: BootConfig,
     payload: Payload,
     guests: SpinLock<Slots>,
+    domain_pool: Option<DomainPool>,
 }
 impl Board for Wave8 {
     const IRQ_DRIVEN_CONSOLE: bool = true;
@@ -74,6 +77,16 @@ impl Board for Wave8 {
     fn boot_service_for(&self, manager_slot: usize) -> Option<usize> {
         // Only the native manager handoff installs the fixed manager/service pair.
         (self.boot.management && manager_slot == 0).then_some(1)
+    }
+    fn domain_pool(&self) -> Option<&DomainPool> {
+        self.domain_pool.as_ref()
+    }
+    fn boot_service_quota(&self, manager_slot: usize) -> Option<Budget> {
+        (manager_slot == 0 && self.domain_pool.is_some()).then_some(Budget::from_bytes(
+            8,
+            8,
+            8 * 64 * 1024,
+        ))
     }
     fn take_resources(&self, slot: usize, _config: &VmConfig) -> Result<VmResources> {
         self.guests.lock().take(slot)
@@ -126,6 +139,10 @@ pub unsafe fn prepare(hart: usize, dtb: usize) -> Result<&'static Wave8> {
     let layout = handoff.layout();
     // SAFETY: only the boot hart consumes the validated firmware loans and static storage.
     let (payload, boot, guests) = unsafe { resources(handoff.external, layout)? };
+    let pool_range = handoff.external.and_then(|guest| guest.pool);
+    // SAFETY: handoff validation proved exclusive ownership and disjointness
+    // from all retained sources, both boot slots and native memory users.
+    let domain_pool = unsafe { bind_pool(pool_range)? };
     let info = BoardInfo {
         ram_base: RAM_BASE,
         ram_size: RAM_BYTES,
@@ -135,11 +152,12 @@ pub unsafe fn prepare(hart: usize, dtb: usize) -> Result<&'static Wave8> {
         boot_cpu: 0,
     };
     pauli_hal::hv_info!(
-        "Valence: HS hart 0, timebase {} Hz, {:?} guest, sstc={}, aia_file={}, stats={:#x}\r",
+        "Valence: HS hart 0, timebase {} Hz, {:?} guest, sstc={}, aia_file={}, pool={}, stats={:#x}\r",
         TIMEBASE_HZ,
         payload,
         sstc,
         aia_file,
+        PoolSize(pool_range),
         &raw const pauli_core::trace::PAULI_HS_STATS as usize
     );
     BOARD
@@ -149,9 +167,19 @@ pub unsafe fn prepare(hart: usize, dtb: usize) -> Result<&'static Wave8> {
             boot,
             payload,
             guests: SpinLock::new(guests),
+            domain_pool,
         })
         .map_err(|_| HvError::Busy)?;
     BOARD.get().ok_or(HvError::InvalidState)
+}
+struct PoolSize(Option<PhysRange>);
+impl core::fmt::Display for PoolSize {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(range) => write!(f, "{}K", range.size() / 1024),
+            None => f.write_str("none"),
+        }
+    }
 }
 unsafe fn install_devices() -> Result<()> {
     let resource = DeviceResource {

@@ -136,6 +136,40 @@ regions against firmware and RPU reservations. The native `no-map` grant
 declares ownership to Pauli. OpenSBI programs the physical permissions.
 [OpenSBI domain memory regions](https://github.com/riscv-software-src/opensbi/blob/master/docs/domain_support.md)
 
+## Optional pool for service children
+
+For a headless manager that needs to create and destroy firmware guests,
+append `valence-domain-pool.dtsi` after `valence-linux.dtsi` and
+`valence-manager.dtsi`. With the example fragment the HS banner reports
+`pool=8192K`. Omitting the fragment keeps the two fixed VMs and reports
+`pool=none`. [Domain pool fragment](../configs/boards/valence-domain-pool.dtsi)
+
+The fragment grants HS the exclusive physical interval
+`[0xc0000000,0xc0800000)`, immediately after the legacy Linux/service
+reservation and below Wave9's RPU carveout. The native tree must contain
+one available `openion,wave8-domain-pool` child of `/reserved-memory`
+with a single `reg` tuple, an empty `no-map` property and no `reusable`
+property. Pool base and size are multiples of 2 MiB. The base must be at
+least `0x80000000`, size must be 2 MiB through 1 GiB, and the exclusive
+end must fit within the 56-bit HPA limit. The complete interval must fit
+in a single available DDR bank and be disjoint from firmware, HS, the
+handoff, Image, initrd, boot guests and other reservations. Verify that
+OpenSBI permits HS writes throughout and that loader and DMA users keep
+the range free. A pool declaration requires the external manager role.
+
+The manager receives `CREATE` on its fixed `service` template. Each child
+inherits one vCPU, 64 KiB of private guest RAM and the service firmware.
+The sponsor quota caps allocated children at **8 guests, 8 vCPUs and
+512 KiB of aggregate guest RAM**. A stopped child still counts until
+destroyed. Host page tables, vCPU state and registry metadata also consume
+physical pool space, so available memory can limit creation earlier.
+The manager receives neither `SHAPE` nor any `diskN` grant.
+
+Run `paulictl create service worker` in management Linux. Use the returned
+VM ID and epoch with `paulictl start ID --epoch E`, then
+`paulictl stop ID --epoch E --wait` and `paulictl destroy ID --epoch E`.
+Destroy releases the child's allocation and its quota charge.
+
 ## What Linux receives
 
 The hypervisor copies private VM RAM from validated sources and **generates**
@@ -176,7 +210,7 @@ peer. When both guests are ready the service receives only mail on the
 manager. Log and mailbox access bind both incarnations. On service cold restart, the
 board renews the service's outgoing mail grant when the manager is ready.
 The manager receives its own boot grant when the manager enters Ready.
-This profile uses fixed VMs and virtual devices.
+The optional pool adds permission to clone the fixed service.
 
 Use the [Linux control kit](../integrations/linux/README.md) from the
 management VM. Its kernel bridge calls the [scalar SBI ABI](management-linux.md),

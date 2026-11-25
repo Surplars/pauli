@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+// Append after valence-linux.dtsi and valence-manager.dtsi for a manager boot.
+// Both base and size must be 2 MiB aligned. Reserve these 8 MiB for HS
+// exclusively and check the board's actual DDR and OpenSBI PMP permissions.
+&{/reserved-memory} {
+    domain-pool@c0000000 {
+        compatible = "openion,wave8-domain-pool";
+        reg = <0x0 0xc0000000 0x0 0x00800000>;
+        no-map;
+    };
+};

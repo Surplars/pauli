@@ -257,6 +257,8 @@ pub struct TestBoard {
     pub(super) direct_linux: core::sync::atomic::AtomicBool,
     #[cfg(feature = "guest-control")]
     pub(super) boot_service: core::sync::atomic::AtomicBool,
+    #[cfg(feature = "guest-control")]
+    pub(super) boot_quota: Option<crate::manager::Budget>,
     config: &'static BootConfig,
     resources: SpinLock<[Option<VmResources>; 4]>,
     pool: Option<DomainPool>,
@@ -278,6 +280,10 @@ impl Board for TestBoard {
                 .boot_service
                 .load(core::sync::atomic::Ordering::Relaxed))
         .then_some(1)
+    }
+    #[cfg(feature = "guest-control")]
+    fn boot_service_quota(&self, slot: usize) -> Option<crate::manager::Budget> {
+        (slot == 0).then_some(self.boot_quota).flatten()
     }
     fn take_resources(&self, slot: usize, _config: &VmConfig) -> Result<VmResources> {
         self.resources.lock()[slot].take().ok_or(HvError::Busy)
@@ -402,6 +408,13 @@ impl Fixture {
     ) -> Self {
         let (board, allocations, spare) =
             Self::test_board(host_cpus, guest_cpus, spare_mib, disks, template);
+        Self::from_board(board, allocations, spare)
+    }
+    pub(super) fn from_board(
+        board: TestBoard,
+        allocations: [Allocation; 2],
+        spare: Option<Allocation>,
+    ) -> Self {
         let board = Box::leak(Box::new(board));
         Self {
             runtime: VmRuntime::create(board, Box::leak(Box::new(crate::manager::VmStore::new())))
@@ -486,6 +499,8 @@ impl Fixture {
             direct_linux: core::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "guest-control")]
             boot_service: false.into(),
+            #[cfg(feature = "guest-control")]
+            boot_quota: None,
             resources: SpinLock::new(resources),
             pool,
             disks: disks.map(|entry| entry.map(|(_, disk)| disk)),

@@ -128,7 +128,7 @@ impl<A: HvArch> VmManager<A> {
                 Err(error) => errors[slot] = Some(error),
             }
         }
-        Ok(Self {
+        let manager = Self {
             slots,
             boot_count,
             exclusive_owners,
@@ -137,7 +137,15 @@ impl<A: HvArch> VmManager<A> {
             config,
             errors,
             epoch: AtomicU32::new(BOOT_SLOTS as u32 + 1),
-        })
+        };
+        for (slot, vm) in manager.slots[..boot_count].iter().enumerate() {
+            if vm.is_some()
+                && let Some(limit) = board.boot_service_quota(slot)
+            {
+                manager.set_budget(slot, Some(limit))?;
+            }
+        }
+        Ok(manager)
     }
     /// Highest addressable guest ID, not a promise that every requested shape fits.
     pub fn capacity(&self) -> usize {

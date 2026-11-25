@@ -192,11 +192,16 @@ impl Monitor {
                 continue;
             }
             if ready == manager_slot {
-                let rights = Rights::INSPECT
+                let mut rights = Rights::INSPECT
                     .union(Rights::START)
                     .union(Rights::STOP)
                     .union(Rights::LOG)
                     .union(Rights::MAIL);
+                if runtime.board.domain_pool().is_some()
+                    && runtime.board.boot_service_quota(manager_slot).is_some()
+                {
+                    rights = rights.union(Rights::CREATE);
+                }
                 grant(&manager, service_slot, rights);
             }
             if let Ok(service) = runtime.manager.vm(service_slot)
