@@ -92,6 +92,11 @@ impl Monitor {
         for vm in runtime.manager.vms() {
             let epoch = vm.epoch();
             let state = vm.lifecycle.state();
+            // A failed stop IPI or device join can keep the VM in Stopping.
+            // Report it even when there will be no terminal state transition.
+            if let Some((faults, join)) = vm.take_fault_notice() {
+                self.report_faults(vm.slot + 1, faults, join);
+            }
             ready |= state == State::Ready;
             let (old_epoch, previous) = vm.notice.record(epoch, state);
             if old_epoch != epoch {
@@ -144,9 +149,6 @@ impl Monitor {
                             ": cause={:#x} pc={:#x} value={:#x}",
                             exit.cause, exit.pc, exit.value
                         ));
-                    }
-                    if let Some(error) = vm.join_error() {
-                        self.terminal.output.host(format_args!(": {error:?}"));
                     }
                     self.terminal.output.host(format_args!("\n"));
                 } else if vm.slot == 0 && state == State::Stopped {

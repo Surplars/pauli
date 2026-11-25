@@ -146,6 +146,49 @@ fn failed_native_mutation_or_final_flush_quarantines_only_its_volume() {
         assert_eq!(*disk.durable.lock(), [0; 512]);
     }
 }
+
+#[test]
+fn failed_volume_join_stays_latched_alongside_both_kick_reports() {
+    use super::{model::REJECT_KICK_ONCE, uart_capture::host_output};
+    use crate::monitor::Monitor;
+
+    let (f, disk, _) = fixture(66);
+    let rt = &f.runtime;
+    let slot = create(&f, "writer", Some(0)).unwrap();
+    let vm = rt.manager.vm(slot).unwrap();
+    let epoch = vm.epoch();
+    REJECT_KICK_ONCE.with(|owner| owner.set(Some(0)));
+    assert_eq!(rt.manager.start(rt.board, slot), Err(HvError::Fault));
+    REJECT_KICK_ONCE.with(|owner| owner.set(Some(0)));
+    vm.host_stop();
+    rt.manager.service(rt.board);
+    assert_eq!(disk.pending(), Some(Flush));
+    disk.finish(Flush, false);
+
+    let mut monitor = Monitor::new();
+    let text = host_output(|| monitor.poll(rt));
+    let id = slot + 1;
+    let lines = [
+        std::format!("VM {id} start-kick error=Fault epoch={epoch} owner=0 hart=64 sbi=-4"),
+        std::format!("VM {id} shutdown-kick error=Fault epoch={epoch} owner=0 hart=64 sbi=-4"),
+        std::format!("VM {id} I/O join error=Fault epoch={epoch} owner=0"),
+    ];
+    for line in &lines {
+        assert_eq!(text.lines().filter(|&s| s == line).count(), 1, "{text}");
+    }
+    assert!(!host_output(|| monitor.poll(rt)).contains("error="));
+    // An explicit status query still reports all three after the notices were consumed.
+    rt.board.input.lock().extend(b"vm status writer\n");
+    let status = host_output(|| monitor.poll(rt));
+    for line in &lines {
+        assert!(status.contains(line), "{status}");
+    }
+    assert_eq!(vm.join_error(), Some(HvError::Fault));
+    assert_eq!(vm.try_join(0, rt.manager.link()), Err(HvError::Fault));
+    assert_eq!(rt.manager.start(rt.board, slot), Err(HvError::Busy));
+    drop(vm);
+    assert_eq!(rt.manager.destroy(slot, epoch), Err(HvError::Busy));
+}
 #[cfg(feature = "guest-control")]
 #[test]
 fn management_vcpu_can_only_create_with_its_granted_disk_and_template() {

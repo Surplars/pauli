@@ -21,3 +21,16 @@ pub(super) fn capture(body: impl FnOnce()) -> Vec<u8> {
     body();
     UART.take().unwrap()
 }
+
+pub(super) fn host_output(body: impl FnOnce()) -> std::string::String {
+    use pauli_devices::console::{Decoder, Event, Source};
+    let mut wire = Decoder::new();
+    let mut text = Vec::new();
+    for byte in capture(body) {
+        if let Some(Event::Byte(Source::Host, byte)) = wire.push(byte).unwrap() {
+            text.push(byte);
+        }
+    }
+    assert!(wire.complete());
+    std::string::String::from_utf8(text).unwrap()
+}

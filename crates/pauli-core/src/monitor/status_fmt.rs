@@ -2,7 +2,61 @@
 //! Ownership/Lock Ordering: release each CPU/device lock before console output.
 //! Invariants: reporting never mutates queues, guest state or lifetime ownership.
 use super::*;
+use crate::vm::{ActivationFault, KickFault, ManagementFault, VmFaults};
+
 impl Monitor {
+    pub(super) fn report_faults(
+        &mut self,
+        id: usize,
+        faults: VmFaults,
+        join: Option<ManagementFault>,
+    ) {
+        if let Some(activation) = faults.activation {
+            match activation {
+                ActivationFault::Activation {
+                    epoch,
+                    owner,
+                    error,
+                } => self.terminal.output.host(format_args!(
+                    "VM {id} activation error={error:?} epoch={epoch} owner={owner}\n"
+                )),
+                ActivationFault::StartKick(fault) => self.report_kick(id, "start-kick", fault),
+            }
+        }
+        if let Some(fault) = faults.shutdown_kick {
+            self.report_kick(id, "shutdown-kick", fault);
+        }
+        if let Some(ManagementFault {
+            epoch,
+            owner,
+            error,
+        }) = join
+        {
+            self.terminal.output.host(format_args!(
+                "VM {id} I/O join error={error:?} epoch={epoch} owner={owner}\n"
+            ));
+        }
+    }
+
+    fn report_kick(&mut self, id: usize, operation: &str, fault: KickFault) {
+        let KickFault {
+            epoch,
+            owner,
+            source,
+        } = fault;
+        let out = &mut self.terminal.output;
+        out.host(format_args!(
+            "VM {id} {operation} error={:?} epoch={epoch} owner={owner}",
+            source.error
+        ));
+        if let Some(hart) = source.hart {
+            out.host(format_args!(" hart={hart}"));
+        }
+        if let Some(raw) = source.raw {
+            out.host(format_args!(" sbi={raw}"));
+        }
+        out.host(format_args!("\n"));
+    }
     /// Joined freezes this incarnation's mailboxes. Copy one observation and
     /// release its guard before formatting; never delay a live fence for tracing.
     #[cfg(feature = "selftest")]
@@ -84,12 +138,7 @@ impl Monitor {
                 continue;
             }
             let state = vm.lifecycle.state();
-            if let Some(error) = vm.join_error() {
-                self.terminal.output.host(format_args!(
-                    "VM {} I/O join error={error:?}\n",
-                    vm.slot + 1
-                ));
-            }
+            self.report_faults(vm.slot + 1, vm.faults(), vm.join_fault());
             if let Some(exit) = vm.terminal_exit() {
                 self.terminal.output.host(format_args!(
                     "VM {} exit={:?} cause={:#x} pc={:#x} value={:#x}\n",

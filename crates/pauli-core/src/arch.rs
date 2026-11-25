@@ -358,6 +358,22 @@ pub enum NativeAckPath {
     GuestExit,
     DispatchAck,
 }
+/// Native operation failure. A raw status is present only when firmware rejected the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SmpError {
+    pub error: HvError,
+    pub hart: Option<usize>,
+    pub raw: Option<isize>,
+}
+impl From<HvError> for SmpError {
+    fn from(error: HvError) -> Self {
+        Self {
+            error,
+            hart: None,
+            raw: None,
+        }
+    }
+}
 pub trait ArchSmp {
     /// Optional diagnostic read before global IRQ delivery resumes. No IRQ is acknowledged.
     const SAMPLE_IDLE: Option<fn() -> IdleWake> = None;
@@ -372,13 +388,26 @@ pub trait ArchSmp {
         None
     }
     fn cpu_id() -> usize;
+    /// Firmware's physical ID for a logical owner, when available.
+    fn hart_id(_owner: usize) -> Option<usize> {
+        None
+    }
     /// Signal this native owner after publishing work. A kick after its scan
     /// must remain observable through a concurrent transition to idle.
-    fn kick(owner: usize) -> Result<()>;
+    fn kick(owner: usize) -> Result<()> {
+        Self::kick_detailed(owner).map_err(|failure| failure.error)
+    }
+    /// Preserve native failure details for lifecycle diagnostics.
+    fn kick_detailed(owner: usize) -> core::result::Result<(), SmpError>;
     /// # Safety
     /// Retained unique worker stack/boot record; immutable runtime publication
-    /// precedes start. Entry never returns and must install native CPU state.
-    unsafe fn start(owner: usize, entry: extern "C" fn(usize) -> !, opaque: usize) -> Result<()>;
+    /// precedes start. The backend installs local traps and wake sources before
+    /// calling the non-returning entry on this owner. Start may return first.
+    unsafe fn start(
+        owner: usize,
+        entry: extern "C" fn(usize) -> !,
+        opaque: usize,
+    ) -> core::result::Result<(), SmpError>;
     /// # Safety
     /// Banks put, no locks held, wake sources enabled; the timer may be
     /// disarmed for an interrupt-only waiter. Do not consume pending kicks here.

@@ -5,6 +5,7 @@
 //! Lifecycle: Joined -> Ready -> Stopping -> Joined; fault/reset also join first.
 mod construction;
 pub mod devices;
+mod diagnostics;
 mod image;
 mod irq_bank;
 pub(crate) use image::validate_embedded;
@@ -17,8 +18,9 @@ use crate::{
 };
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use devices::VmDevices;
-use pauli_config::VmConfig;
+pub(crate) use diagnostics::{ActivationFault, KickFault, ManagementFault, VmFaults};
 pub use lifecycle::State;
+use pauli_config::VmConfig;
 use slot::VcpuSlot;
 
 pub struct Vm<A: HvArch> {
@@ -37,7 +39,7 @@ pub struct Vm<A: HvArch> {
     boot: crate::arch::VcpuBoot,
     pub(crate) epoch: AtomicU32,
     pub(crate) started: AtomicBool,
-    join_error: pauli_hal::sync::Once<crate::HvError>,
+    diagnostics: diagnostics::Diagnostics,
     terminal: pauli_hal::sync::SpinLock<Option<crate::arch::VcpuExit>>,
 }
 impl<A: HvArch> Vm<A> {
@@ -56,9 +58,6 @@ impl<A: HvArch> Vm<A> {
     }
     pub fn retired(&self) -> bool {
         self.cpus.iter().all(|cpu| cpu.retired())
-    }
-    pub fn join_error(&self) -> Option<crate::HvError> {
-        self.join_error.get().copied()
     }
     pub fn terminal_exit(&self) -> Option<crate::arch::VcpuExit> {
         *self.terminal.lock()

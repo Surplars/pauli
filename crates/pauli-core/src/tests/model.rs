@@ -15,13 +15,16 @@ use pauli_hal::{device::*, mem::PhysRange, sync::SpinLock};
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
     boxed::Box,
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::VecDeque,
     vec,
 };
 std::thread_local! {
     pub static OWNER: Cell<usize> = const { Cell::new(0) };
     pub static NOW: Cell<u64> = const { Cell::new(0) };
+    pub(super) static CLOCK_READ: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    pub(super) static WORKER_STARTS: Cell<u64> = const { Cell::new(0) };
+    pub(super) static REJECT_WORKER_START: Cell<Option<usize>> = const { Cell::new(None) };
     pub static KICKS: Cell<u64> = const { Cell::new(0) };
     pub(super) static KICKED_OWNERS: Cell<usize> = const { Cell::new(0) };
     static PENDING_KICKS: Cell<usize> = const { Cell::new(0) };
@@ -36,6 +39,7 @@ std::thread_local! {
     // One sender can model a receiver running while its native kick is still in flight.
     pub(super) static KICK_IN_FLIGHT: Cell<Option<Box<dyn FnOnce(usize)>>> = const { Cell::new(None) };
     pub(super) static REJECT_NEXT_SPACE: Cell<bool> = const { Cell::new(false) };
+    pub(super) static REJECT_NEXT_IRQ_CHIP: Cell<bool> = const { Cell::new(false) };
 }
 pub struct Arch;
 pub struct Timer;
@@ -44,6 +48,11 @@ impl ArchTimer for Timer {
         Self
     }
     fn now() -> u64 {
+        CLOCK_READ.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook();
+            }
+        });
         NOW.with(Cell::get)
     }
     unsafe fn arm(&mut self, deadline: u64) -> Result<()> {
@@ -78,12 +87,20 @@ impl ArchSmp for Smp {
     fn cpu_id() -> usize {
         OWNER.with(Cell::get)
     }
-    fn kick(owner: usize) -> Result<()> {
+    fn hart_id(owner: usize) -> Option<usize> {
+        // Keep physical IDs distinct from logical indices in diagnostic tests.
+        Some(0x40 + 2 * owner)
+    }
+    fn kick_detailed(owner: usize) -> core::result::Result<(), SmpError> {
         KICKS.with(|k| k.set(k.get() + 1));
         KICKED_OWNERS.with(|k| k.set(k.get() | (1 << owner)));
         if REJECT_KICK_ONCE.with(|o| o.get() == Some(owner)) {
             REJECT_KICK_ONCE.with(|o| o.set(None));
-            return Err(HvError::Fault);
+            return Err(SmpError {
+                error: HvError::Fault,
+                hart: Self::hart_id(owner),
+                raw: Some(-4),
+            });
         }
         PENDING_KICKS.with(|k| k.set(k.get() | (1 << owner)));
         if let Some(hook) = KICK_IN_FLIGHT.with(Cell::take) {
@@ -92,10 +109,18 @@ impl ArchSmp for Smp {
         Ok(())
     }
     unsafe fn start(
-        _owner: usize,
+        owner: usize,
         _entry: extern "C" fn(usize) -> !,
         _opaque: usize,
-    ) -> Result<()> {
+    ) -> core::result::Result<(), SmpError> {
+        WORKER_STARTS.with(|starts| starts.set(starts.get() | (1u64 << owner)));
+        if REJECT_WORKER_START.with(|reject| reject.get() == Some(owner)) {
+            return Err(SmpError {
+                error: HvError::Fault,
+                hart: Self::hart_id(owner),
+                raw: Some(-6),
+            });
+        }
         Ok(())
     }
     unsafe fn idle() {
@@ -151,6 +176,9 @@ pub struct Irqs {
 }
 impl VirtualIrqChip for Irqs {
     fn create(_cpus: u8, _advanced: bool) -> Result<Self> {
+        if REJECT_NEXT_IRQ_CHIP.with(Cell::take) {
+            return Err(HvError::Unsupported);
+        }
         Ok(Self::default())
     }
     fn access(
@@ -379,6 +407,9 @@ impl Fixture {
         template: impl Fn(usize, &mut VmConfig) -> BootImages,
     ) -> (TestBoard, [Allocation; 2], Option<Allocation>) {
         NOW.with(|n| n.set(0));
+        CLOCK_READ.with(|hook| hook.take());
+        WORKER_STARTS.with(|starts| starts.set(0));
+        REJECT_WORKER_START.with(|reject| reject.set(None));
         PENDING_KICKS.with(|k| k.set(0));
         #[cfg(feature = "selftest")]
         NATIVE_ACK.with(|a| a.iter().for_each(|v| v.set(None)));

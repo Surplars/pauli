@@ -176,7 +176,10 @@ impl<A: HvArch> VmManager<A> {
         if !vm.lifecycle.joined() {
             return Err(HvError::Busy);
         }
-        let epoch = self.next_epoch()?;
+        let epoch = self.next_epoch().inspect_err(|&error| {
+            // No new epoch exists to attribute this failure to.
+            vm.activation_failed(vm.epoch(), error);
+        })?;
         vm.start(board, epoch, self.link(), A::Timer::now())
     }
     fn next_epoch(&self) -> Result<u32> {
@@ -193,9 +196,7 @@ impl<A: HvArch> VmManager<A> {
             if vm.lifecycle.stopping() {
                 match vm.try_join(now, self.link()) {
                     Ok(true) if vm.lifecycle.reset_requested() && !vm.config.stop_on_reset => {
-                        if self.start(board, vm.slot).is_err() {
-                            vm.request_stop(true, false);
-                        }
+                        let _ = self.start(board, vm.slot);
                     }
                     // The CPU side has joined, but I/O is not reusable. Keep
                     // the VM stopped at the barrier and surface the error once.

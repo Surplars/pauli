@@ -14,7 +14,7 @@ use crate::{
         slot::{CpuState, FenceWait, Pending, VcpuSlot},
     },
 };
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use pauli_hal::sync::LocalIrq;
 mod control;
 mod deadline;
@@ -25,6 +25,7 @@ mod idle_observation;
 mod owner;
 mod pending;
 mod workers;
+pub use workers::WorkerStartupError;
 
 pub struct VmRuntime<A: HvArch, B: Board> {
     pub board: &'static B,
@@ -33,6 +34,7 @@ pub struct VmRuntime<A: HvArch, B: Board> {
     diskless_single_hart: bool,
     // Written and consumed only on the single management hart.
     service_due: AtomicBool,
+    online_workers: AtomicU64,
     ready: AtomicBool,
     #[cfg(feature = "selftest")]
     idle_wakes: idle_observation::IdleCounters,
@@ -88,6 +90,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             firmware_only,
             diskless_single_hart,
             service_due: AtomicBool::new(false),
+            online_workers: AtomicU64::new(0),
             ready: AtomicBool::new(false),
             #[cfg(feature = "selftest")]
             idle_wakes: Default::default(),

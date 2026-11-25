@@ -86,7 +86,7 @@ impl<A: HvArch> Vm<A> {
             boot: image_boot,
             epoch: AtomicU32::new(epoch),
             started: AtomicBool::new(false),
-            join_error: pauli_hal::sync::Once::new(),
+            diagnostics: diagnostics::Diagnostics::new(),
             terminal: SpinLock::new(None),
         })
     }

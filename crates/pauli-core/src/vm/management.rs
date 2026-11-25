@@ -12,17 +12,32 @@ use pauli_hal::sync::SpinLock;
 impl<A: HvArch> Vm<A> {
     pub fn request_stop(&self, fault: bool, reset: bool) {
         self.lifecycle.request_stop(fault, reset);
-        let _ = self.kick_owners(); // Stop stays closed even if a native IPI fails.
+        self.kick_stopping_owners();
     }
     pub fn host_stop(&self) {
         self.lifecycle.cancel_reset();
-        let _ = self.kick_owners();
+        self.kick_stopping_owners();
     }
-    fn kick_owners(&self) -> Result<()> {
+    fn kick_stopping_owners(&self) {
+        if let Err(fault) = self.kick_owners() {
+            self.record_shutdown_kick(fault);
+        }
+    }
+    fn kick_owners(&self) -> core::result::Result<(), KickFault> {
         // Start/stop/retirement concern every owner, independent of IRQ routing.
-        self.kick_lanes(self.devices.lanes)
+        let epoch = self.epoch();
+        self.kick_lanes(self.devices.lanes, A::Smp::kick_detailed)
+            .map_err(|(owner, source)| KickFault {
+                epoch,
+                owner,
+                source,
+            })
     }
-    fn kick_lanes(&self, mut lanes: usize) -> Result<()> {
+    fn kick_lanes<E>(
+        &self,
+        mut lanes: usize,
+        kick: impl Fn(usize) -> core::result::Result<(), E>,
+    ) -> core::result::Result<(), (usize, E)> {
         let mut seen = 0u64; // A shared physical owner needs only one IPI.
         let mut retry = 0;
         let mut result = Ok(());
@@ -32,10 +47,12 @@ impl<A: HvArch> Vm<A> {
             let owner = self.cpus[index].owner;
             let bit = 1u64 << owner;
             if seen & bit == 0 {
-                if let Err(error) = A::Smp::kick(owner) {
+                if let Err(error) = kick(owner) {
                     // One lane represents the failed owner; continue with its peers.
                     retry |= 1usize << index;
-                    result = Err(error);
+                    if result.is_ok() {
+                        result = Err((owner, error));
+                    }
                 }
                 seen |= bit;
             }
@@ -58,7 +75,7 @@ impl<A: HvArch> Vm<A> {
                     return;
                 }
             }
-            let _ = self.kick_lanes(self.devices.wake.swap(0, Ordering::AcqRel));
+            let _ = self.kick_lanes(self.devices.wake.swap(0, Ordering::AcqRel), A::Smp::kick);
         }
     }
     #[cfg(feature = "selftest")]
@@ -101,11 +118,6 @@ impl<A: HvArch> Vm<A> {
         let devices = self.devices.stop(now, link)?;
         Ok(self.lifecycle.commit_join(self.retired(), devices))
     }
-    pub(crate) fn fail_join(&self, error: HvError) {
-        if self.join_error.set(error).is_ok() {
-            self.request_stop(true, false);
-        }
-    }
     pub fn start<B: Board>(
         &self,
         board: &B,
@@ -113,11 +125,57 @@ impl<A: HvArch> Vm<A> {
         link: &SpinLock<Link>,
         now: u64,
     ) -> Result<()> {
-        if !self.lifecycle.joined() || !self.retired() {
+        if !self.lifecycle.joined() || !self.retired() || self.join_error().is_some() {
             return Err(HvError::Busy);
         }
         let rebuild = self.lifecycle.begin_rebuild()?;
         let old = self.started.swap(true, Ordering::AcqRel);
+        let epoch = if old { epoch } else { self.epoch() };
+        self.begin_activation();
+        *self.terminal.lock() = None;
+        if let Err(error) = self.prepare_start(board, epoch, old, link, now) {
+            drop(rebuild);
+            self.activation_failed(epoch, error);
+            // A partial activation may already have reset a disk or bound a port.
+            self.lifecycle.require_device_join();
+            return Err(error);
+        }
+        if let Err(error) = rebuild.publish() {
+            // A concurrent stop cancelled admission. Drain prepared devices.
+            self.record_activation(ActivationFault::Activation {
+                epoch,
+                owner: A::Smp::cpu_id(),
+                error,
+            });
+            self.lifecycle.require_device_join();
+            return Err(error);
+        }
+        // Report the original start IPI separately from any failed stop IPI.
+        if let Err(fault) = self.kick_owners() {
+            self.record_activation(ActivationFault::StartKick(fault));
+            self.request_stop(true, false);
+            return Err(fault.source.error);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn activation_failed(&self, epoch: u32, error: HvError) {
+        self.record_activation(ActivationFault::Activation {
+            epoch,
+            owner: A::Smp::cpu_id(),
+            error,
+        });
+        self.lifecycle.request_stop(true, false);
+    }
+
+    fn prepare_start<B: Board>(
+        &self,
+        board: &B,
+        epoch: u32,
+        old: bool,
+        link: &SpinLock<Link>,
+        now: u64,
+    ) -> Result<()> {
         if old {
             let hz = board.info().timebase_hz;
             let unix = match board.rtc() {
@@ -150,17 +208,6 @@ impl<A: HvArch> Vm<A> {
         if let Some(net) = &mut io.net {
             net.activate(self.epoch(), link)?;
         }
-        drop(io);
-        *self.terminal.lock() = None;
-        if let Err(error) = rebuild.publish() {
-            // No CPU ever entered this activation. If a concurrent stop
-            // cancelled publication, drain devices before a later retry.
-            self.lifecycle.require_device_join();
-            return Err(error);
-        }
-        // The first IPI may be the only wake source of a previously unassigned
-        // worker. Never report a successful start if firmware rejected it.
-        self.kick_owners()
-            .inspect_err(|_| self.request_stop(true, false))
+        Ok(())
     }
 }

@@ -25,3 +25,4 @@ mod uncontended;
 mod volumes;
 mod wake_delivery;
 mod wide;
+mod workers;

@@ -10,7 +10,7 @@ use crate::native_harts::NativeHarts;
 pub use crate::native_harts::worker_stack_bytes;
 use pauli_core::{
     HvError, Result,
-    arch::{ArchSmp, MAX_CPUS},
+    arch::{ArchSmp, MAX_CPUS, SmpError},
 };
 use pauli_hal::sync::{LocalIrq, Once};
 struct Topology {
@@ -45,21 +45,35 @@ pub fn install_with_stacks(
         })
         .map_err(|_| HvError::Busy)
 }
-pub fn kick_cpu(owner: usize) -> SbiRet {
-    let Some(hart) = TOPOLOGY.get().and_then(|t| t.harts.hart(owner)) else {
-        return SbiRet {
-            error: -3,
-            value: 0,
-        };
-    };
+fn kick_hart(owner: usize, hart: usize) -> SbiRet {
     if owner == host::cpu_id() {
-        // SAFETY: HS owns its software kick; release normal-memory publications first.
+        // SAFETY: HS owns its software kick; publish work before setting SSIP.
         unsafe {
             core::arch::asm!("fence w, o", "csrs sip, {ssip}", ssip=in(reg) crate::bits::SSIP, options(nostack));
         }
         SbiRet { error: 0, value: 0 }
     } else {
         sbi::send_ipi(hart)
+    }
+}
+pub fn kick_cpu(owner: usize) -> SbiRet {
+    match RiscvSmp::hart_id(owner) {
+        Some(hart) => kick_hart(owner, hart),
+        None => SbiRet {
+            error: -3,
+            value: 0,
+        },
+    }
+}
+fn firmware_result(hart: usize, ret: SbiRet) -> core::result::Result<(), SmpError> {
+    if ret.error == 0 {
+        Ok(())
+    } else {
+        Err(SmpError {
+            error: HvError::Fault,
+            hart: Some(hart),
+            raw: Some(ret.error),
+        })
     }
 }
 pub struct RiscvSmp;
@@ -77,14 +91,18 @@ impl ArchSmp for RiscvSmp {
     fn cpu_id() -> usize {
         host::cpu_id()
     }
-    fn kick(owner: usize) -> Result<()> {
-        if kick_cpu(owner).error == 0 {
-            Ok(())
-        } else {
-            Err(HvError::Fault)
-        }
+    fn hart_id(owner: usize) -> Option<usize> {
+        TOPOLOGY.get()?.harts.hart(owner)
     }
-    unsafe fn start(owner: usize, entry: extern "C" fn(usize) -> !, opaque: usize) -> Result<()> {
+    fn kick_detailed(owner: usize) -> core::result::Result<(), SmpError> {
+        let hart = Self::hart_id(owner).ok_or(HvError::InvalidConfig)?;
+        firmware_result(hart, kick_hart(owner, hart))
+    }
+    unsafe fn start(
+        owner: usize,
+        entry: extern "C" fn(usize) -> !,
+        opaque: usize,
+    ) -> core::result::Result<(), SmpError> {
         let topology = TOPOLOGY.get().ok_or(HvError::InvalidState)?;
         let top = topology
             .harts
@@ -100,11 +118,7 @@ impl ArchSmp for RiscvSmp {
         let record = BOOTS[owner].get().ok_or(HvError::InvalidState)?;
         // SAFETY: boot/stack/runtime data were published and remain static until shutdown.
         let ret = unsafe { record.start(hart) };
-        if ret.error == 0 {
-            Ok(())
-        } else {
-            Err(HvError::Fault)
-        }
+        firmware_result(hart, ret)
     }
     unsafe fn idle() {
         // SAFETY: core put all banks, armed/rechecked wakeups and holds no lock.
