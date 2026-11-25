@@ -168,6 +168,7 @@ pub(crate) unsafe fn guest_run_with_interval(
     ctx: &mut VCpuContext,
     interval: Option<&mut pauli_core::arch::TickInterval>,
 ) -> Result<VmExit, crate::Error> {
+    ctx.check_sstc_owner(crate::local_sstc_available)?;
     // SAFETY: exclusive IRQ-masked physical owner and immutable epoch/root.
     unsafe {
         crate::vmid::prepare(ctx)?;

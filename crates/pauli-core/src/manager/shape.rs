@@ -36,11 +36,33 @@ pub(super) fn config(source: &VmConfig, spec: ChildSpec, host_cpus: u8) -> Resul
     Ok(child)
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct DtbChange {
+    pub source_sstc: bool,
+    pub target_sstc: bool,
+    /// An untouched, opaque baseline is still safe on Sstc-capable owners.
+    pub optional: bool,
+}
+
 pub(super) fn rebuild<A: HvArch, B: Board>(
     board: &B,
     source: &VmConfig,
     child: &mut VmConfig,
     resources: &mut VmResources,
+    change: DtbChange,
+) -> Result<()> {
+    match render::<A, B>(board, source, child, resources, change) {
+        Err(HvError::Unsupported | HvError::InvalidImage) if change.optional => Ok(()),
+        result => result,
+    }
+}
+
+fn render<A: HvArch, B: Board>(
+    board: &B,
+    source: &VmConfig,
+    child: &mut VmConfig,
+    resources: &mut VmResources,
+    change: DtbChange,
 ) -> Result<()> {
     let original = resources.images.dtb;
     let tree = Fdt::new(original).map_err(|_| HvError::InvalidImage)?;
@@ -56,15 +78,18 @@ pub(super) fn rebuild<A: HvArch, B: Board>(
     let layout = board.layout();
     // Recreate the original first. Extra firmware reservations, custom nodes or
     // boot policy must not silently disappear when we change the CPU/RAM shape.
-    let baseline = A::write_linux_dtb(source, layout, hz, args, out)?;
-    let render = if out.get(..baseline) == Some(original) {
-        A::write_linux_dtb
+    let original_size = if change.source_sstc {
+        A::write_extended_linux_dtb(source, layout, hz, args, out)?
     } else {
-        let extended = A::write_extended_linux_dtb(source, layout, hz, args, out)?;
-        if out.get(..extended) != Some(original) {
-            return Err(HvError::Unsupported);
-        }
+        A::write_linux_dtb(source, layout, hz, args, out)?
+    };
+    if out.get(..original_size) != Some(original) {
+        return Err(HvError::Unsupported);
+    }
+    let render = if change.target_sstc {
         A::write_extended_linux_dtb
+    } else {
+        A::write_linux_dtb
     };
     let len = render(child, layout, hz, args, out)?;
     resources.images.dtb = out.get(..len).ok_or(HvError::InvalidImage)?;

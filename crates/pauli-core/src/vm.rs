@@ -46,6 +46,9 @@ impl<A: HvArch> Vm<A> {
     pub fn epoch(&self) -> u32 {
         self.epoch.load(Ordering::Acquire)
     }
+    pub(crate) fn guest_sstc(&self) -> bool {
+        self.boot.sstc
+    }
     pub fn cpu(&self, index: usize) -> Option<&VcpuSlot<A::Vcpu>> {
         self.cpus.get(index)
     }

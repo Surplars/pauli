@@ -1,8 +1,8 @@
 //! Board loader policy: checked host-only firmware, manifest, image and guest ownership.
 //! Ownership/Lock Ordering: one boot owner reserves fixed intervals before DMA allocation.
 //! Invariants: no source or DTB pointer is formed until it is confined to retained RAM.
-use crate::fdt::parsed;
-use pauli_config::{BootConfig, MAX_BOOT_VMS, VmConfig, WIRE_SIZE, loader::*};
+use crate::fdt::{Topology, parsed};
+use pauli_config::{BootConfig, MAX_BOOT_VMS, MAX_GUEST_DTB, VmConfig, WIRE_SIZE, loader::*};
 use pauli_core::{
     HvError, Result,
     board::{BootImages, VmResources},
@@ -87,14 +87,68 @@ impl Loader {
             dtbs,
         })
     }
-    pub fn resources(&mut self, hz: u64) -> Result<[Option<VmResources>; MAX_BOOT_VMS]> {
+    pub fn resources(
+        &mut self,
+        topology: &Topology,
+    ) -> Result<[Option<VmResources>; MAX_BOOT_VMS]> {
+        self.stage_timers(topology)?;
         let mut resources = [const { None }; MAX_BOOT_VMS];
         for (index, config) in self.config.vms.into_iter().enumerate() {
             if let Some(vm) = config {
-                resources[index] = Some(self.resources_for(vm, hz)?);
+                resources[index] = Some(self.resources_for(vm, topology.hz)?);
             }
         }
         Ok(resources)
+    }
+    /// The launcher cannot know firmware's Sstc grants. Before any secondary is
+    /// started, only guests wholly assigned to probed harts may gain Sstc.
+    fn stage_timers(&mut self, topology: &Topology) -> Result<()> {
+        let mut upgrade = [false; MAX_BOOT_VMS];
+        for (index, vm) in self.config.vms.iter().flatten().enumerate() {
+            if vm.firmware.is_none() && vm.validate_placement(topology.count as u8).is_ok() {
+                let owners = vm.owner_mask(index, topology.boot, topology.count);
+                upgrade[index] = pauli_arch_riscv::sstc_available_for_owners(owners);
+            }
+        }
+        if !upgrade.contains(&true) {
+            return Ok(());
+        }
+        let hz = u32::try_from(topology.hz).map_err(|_| HvError::InvalidConfig)?;
+        // Keep manifest offsets and lengths consistent with the staged bundle.
+        // One retained HS allocation also keeps the original loader byte ranges immutable.
+        let trees = match self.take_bytes(self.config.count() * MAX_GUEST_DTB, PAGE_SIZE) {
+            Ok(trees) => trees,
+            // The existing canonical baseline still boots with SBI TIME.
+            Err(HvError::Exhausted) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for (index, mut vm) in self.config.vms.into_iter().flatten().enumerate() {
+            let original = self.guest_tree(&vm)?;
+            let offset = index * MAX_GUEST_DTB;
+            let slot = &mut trees[offset..offset + MAX_GUEST_DTB];
+            let extended = if upgrade[index] {
+                qemu_virt_riscv::guest_tree::enable_sstc(&vm, original, hz, slot)
+            } else {
+                None
+            };
+            let size = extended.unwrap_or_else(|| {
+                slot[..original.len()].copy_from_slice(original);
+                original.len()
+            });
+            vm.dtb_offset = offset as u64;
+            vm.dtb_size = size as u64;
+            self.config.vms[index] = Some(vm);
+        }
+        self.dtbs = range(trees.as_ptr() as usize, trees.len())?;
+        self.config.dtb_size = trees.len() as u64;
+        Ok(())
+    }
+    fn guest_tree(&self, vm: &VmConfig) -> Result<&'static [u8]> {
+        self.source(
+            self.dtbs,
+            self.dtbs.base() + vm.dtb_offset as usize,
+            vm.dtb_size as usize,
+        )
     }
     fn resources_for(&mut self, vm: VmConfig, hz: u64) -> Result<VmResources> {
         let image = vm.image;
@@ -108,17 +162,15 @@ impl Loader {
             image.initrd_source as usize,
             image.initrd_size as usize,
         )?;
-        let dtb = self.source(
-            self.dtbs,
-            self.dtbs.base() + vm.dtb_offset as usize,
-            vm.dtb_size as usize,
-        )?;
+        let dtb = self.guest_tree(&vm)?;
         let cpus = parsed(parsed(Fdt::new(dtb))?.find("/cpus"))?.ok_or(HvError::InvalidImage)?;
         if parsed(cpus.u32("timebase-frequency"))?.map(u64::from) != Some(hz) {
             return Err(HvError::InvalidImage);
         }
         let bytes = TABLE_ARENA_BYTES
-            + pauli_core::vm::Vm::<pauli_arch_riscv::interface::RiscvHvArch>::vcpu_arena_bytes(vm.vcpus)?
+            + pauli_core::vm::Vm::<pauli_arch_riscv::interface::RiscvHvArch>::vcpu_arena_bytes(
+                vm.vcpus,
+            )?
             + if vm.disk.is_some() {
                 pauli_core::backends::block::BUFFER_BYTES
             } else {

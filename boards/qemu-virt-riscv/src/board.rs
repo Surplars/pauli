@@ -90,8 +90,8 @@ pub fn prepare(hart: usize, dtb: usize) -> Result<&'static QemuVirtBoard> {
         host::trap::install_vector();
     }
     pauli_arch_riscv::init_capabilities(true, topology.fd, topology.aia);
-    // SAFETY: OpenSBI handed off the validated native topology with local IRQs masked.
-    unsafe { pauli_arch_riscv::init_boot_sstc(topology.count) };
+    // SAFETY: boot owns its compare with local IRQs masked, tp and trap vector installed.
+    unsafe { pauli_arch_riscv::init_local_sstc() };
     let (root, guest_ids) = irq::Root::discover(tree, &topology, ram)?;
     #[cfg(feature = "aia-guest-file")]
     // SAFETY: FDT established a supported S-file topology; guest file 1 is reserved.
@@ -119,7 +119,7 @@ pub fn prepare(hart: usize, dtb: usize) -> Result<&'static QemuVirtBoard> {
         loader.take_bytes(bytes, pauli_hal::addr::PAGE_SIZE)?
     };
     smp::install_with_stacks(&topology.harts[..topology.count], guest_ids, stacks)?;
-    let resources = loader.resources(topology.hz)?;
+    let resources = loader.resources(&topology)?;
     let (devices, routes) = Devices::initialize(tree, ram, Some(&mut loader), &root)?;
     irq::ROUTER.set((root, routes)).map_err(|_| HvError::Busy)?;
     host::trap::set_handler(irq::event).map_err(|_| HvError::Busy)?;

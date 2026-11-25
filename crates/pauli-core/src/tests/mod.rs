@@ -19,6 +19,7 @@ mod quota;
 mod restart;
 mod runtime;
 mod shape;
+mod sstc;
 mod storage;
 mod uart_capture;
 mod uncontended;

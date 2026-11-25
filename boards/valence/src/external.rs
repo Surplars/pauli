@@ -98,7 +98,8 @@ fn render(vm: &mut VmConfig, args: &str, out: &mut [u8], layout: GuestBoardLayou
         layout,
         TIMEBASE_HZ as u32,
         args,
-        pauli_arch_riscv::sstc_available(),
+        // The Valence handoff admits the boot hart as its only native owner.
+        pauli_arch_riscv::sstc_available_for_owners(1),
         out,
     )
     .map_err(|_| HvError::InvalidImage)? as u64;

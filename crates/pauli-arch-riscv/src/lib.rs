@@ -3,6 +3,8 @@
 //! Ownership/Lock Ordering: physical owner excludes IRQs on entry; no VM registry here.
 //! Invariants: immutable G-stage backing, full FP isolation and retirement before RAM reuse.
 
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 pub mod aia;
 pub mod bits;
 pub mod context;
@@ -47,20 +49,68 @@ const _: () = assert!(MAX_CPUS <= usize::BITS as usize); // VMID and IMSIC owner
 pub const MAX_VCPUS: usize = pauli_config::MAX_GUEST_VCPUS as usize;
 pub const VS_PAGE_FAULTS: usize = (1 << 12) | (1 << 13) | (1 << 15);
 pub const VS_OS_EXCEPTIONS: usize = VS_PAGE_FAULTS | 0x1ff;
-static PRESENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-static SSTC: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static PRESENT: AtomicBool = AtomicBool::new(false);
 
-pub fn available() -> bool {
-    PRESENT.load(core::sync::atomic::Ordering::Relaxed)
+/// A set bit identifies a logical native owner that completed its compare probe.
+static SSTC_OWNERS: AtomicUsize = AtomicUsize::new(0);
+
+fn owner_bit(owner: usize) -> usize {
+    if owner < MAX_CPUS.min(usize::BITS as usize) {
+        1usize << owner
+    } else {
+        0
+    }
 }
 
+fn owners_have_sstc(owners: &AtomicUsize, mask: usize) -> bool {
+    mask != 0 && owners.load(Ordering::Acquire) & mask == mask
+}
+
+#[cfg(any(target_arch = "riscv64", test))]
+fn probe_owner_sstc(
+    owners: &AtomicUsize,
+    owner: usize,
+    gates: bool,
+    disarm: impl FnOnce() -> bool,
+) -> bool {
+    let bit = owner_bit(owner);
+    if bit == 0 {
+        return false;
+    }
+    let supported = gates && disarm();
+    if supported {
+        owners.fetch_or(bit, Ordering::Release);
+    } else {
+        owners.fetch_and(!bit, Ordering::Release);
+    }
+    supported
+}
+
+pub fn available() -> bool {
+    PRESENT.load(Ordering::Relaxed)
+}
+
+pub fn local_sstc_available() -> bool {
+    #[cfg(target_arch = "riscv64")]
+    let owner = host::cpu_id();
+    #[cfg(not(target_arch = "riscv64"))]
+    let owner = 0;
+    sstc_available_for_owners(owner_bit(owner))
+}
+
+/// Guest exposure requires every owner in its nonempty placement mask to qualify.
+pub fn sstc_available_for_owners(mask: usize) -> bool {
+    owners_have_sstc(&SSTC_OWNERS, mask)
+}
+
+/// Capability of the calling native hart.
 pub fn sstc_available() -> bool {
-    SSTC.load(core::sync::atomic::Ordering::Relaxed)
+    local_sstc_available()
 }
 
 #[cfg(test)]
 fn init_sstc(available: bool) {
-    SSTC.store(available, core::sync::atomic::Ordering::Relaxed);
+    probe_owner_sstc(&SSTC_OWNERS, 0, available, || true);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,7 +131,7 @@ pub enum VmResetKind {
 }
 
 #[cfg(target_arch = "riscv64")]
-unsafe fn probe_sstc() -> bool {
+unsafe fn probe_sstc_gates() -> bool {
     let (env, counters): (usize, usize);
     // The base H switch already requires access to both CSRs. Test their WARL
     // bits first, without assuming firmware enabled supervisor compare access.
@@ -107,26 +157,24 @@ unsafe fn probe_sstc() -> bool {
     env & bits::HENVCFG_STCE != 0 && counters & bits::COUNTER_TIME != 0
 }
 
-/// Probe the one physical owner before publishing any vCPU or unmasking STIE.
-/// Multi-hart firmware can configure different machine-mode gates on each hart.
+/// Probe this owner before unmasking STIE or acknowledging worker readiness.
 /// # Safety
-/// The caller owns the boot hart and its timer with local interrupts masked,
-/// has installed the native trap vector and initialized H capabilities, and
-/// supplies the entire native topology. The base H environment CSRs are accessible.
+/// The caller owns this hart and timer with local interrupts masked, has an installed
+/// native trap vector and logical owner in tp, and has initialized H capabilities.
+/// The base H environment CSRs are accessible. This is a bootstrap operation:
+/// the owner must not have an admitted vCPU or an active dispatcher.
 #[cfg(target_arch = "riscv64")]
-pub unsafe fn init_boot_sstc(native_harts: usize) {
-    let enabled = native_harts == 1 && available() && unsafe { probe_sstc() };
-    // Only the IRQ-masked boot hart can observe this intermediate state.
-    // A successful write both proves mcounteren.TM and disarms the unknown
-    // reset compare. A denied write takes the exact native fixup and selects SBI.
-    SSTC.store(enabled, core::sync::atomic::Ordering::Relaxed);
-    if enabled && !unsafe { host::timer::disarm_boot_sstc() } {
-        SSTC.store(false, core::sync::atomic::Ordering::Relaxed);
-    }
+pub unsafe fn init_local_sstc() -> bool {
+    let gates = available() && unsafe { probe_sstc_gates() };
+    // A successful write proves HS compare access and disarms its reset value.
+    // Firmware denial takes the exact native fixup before this owner is published.
+    probe_owner_sstc(&SSTC_OWNERS, host::cpu_id(), gates, || unsafe {
+        host::timer::probe_disarm_stimecmp()
+    })
 }
 
 pub fn init_capabilities(hypervisor: bool, floating_point: bool, ssaia: bool) {
-    PRESENT.store(hypervisor, core::sync::atomic::Ordering::Relaxed);
+    PRESENT.store(hypervisor, Ordering::Relaxed);
     fp::init_capability(hypervisor && floating_point);
     aia::init_capability(hypervisor && ssaia);
 }

@@ -139,6 +139,8 @@ extern "C" fn trampoline(_hart: usize, owner: usize) -> ! {
     // SAFETY: HSM assembly installed this CPU's retained stack and explicit tp.
     unsafe {
         host::trap::install_vector();
+        // This owner still has interrupts masked and has no active dispatcher.
+        crate::init_local_sstc();
     }
     #[cfg(feature = "aia-guest-file")]
     if let Some(topology) = TOPOLOGY.get() {

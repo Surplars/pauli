@@ -27,6 +27,7 @@ unsafe impl LocalIrq for Mask {
 
 pub struct Cpu {
     pub boot_opaque: usize,
+    pub sstc: bool,
     pub epoch: u32,
     pub index: u8,
     pub steps: u64,
@@ -102,6 +103,7 @@ impl ArchVcpu for Cpu {
     ) -> Result<Self> {
         Ok(Self {
             boot_opaque: boot.opaque,
+            sstc: boot.sstc,
             epoch,
             index,
             steps: 0,

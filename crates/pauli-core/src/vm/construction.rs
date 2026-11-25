@@ -6,7 +6,7 @@ use super::*;
 use crate::{
     HvError, Result,
     arch::{ArchVcpu, Stage2Space},
-    board::{Board, VmResources},
+    board::{Board, Payload, VmResources},
 };
 use pauli_hal::sync::SpinLock;
 impl<A: HvArch> Vm<A> {
@@ -41,7 +41,24 @@ impl<A: HvArch> Vm<A> {
                 .ok()
                 .filter(|ticks| *ticks != 0)
                 .ok_or(HvError::InvalidConfig)?;
-        let image_boot = image::boot(&config, board.payload(), info.timebase_hz)?;
+        config
+            .validate_placement(info.host_cpus as u8)
+            .map_err(|_| HvError::InvalidConfig)?;
+        let payload = board.payload();
+        let sstc =
+            payload != Payload::Embedded && A::guest_sstc(resources.images.dtb, config.vcpus)?;
+        if sstc
+            && (payload != Payload::Linux
+                || config.firmware.is_some()
+                || !A::sstc_available_for_owners(config.owner_mask(
+                    slot,
+                    info.boot_cpu,
+                    info.host_cpus,
+                )))
+        {
+            return Err(HvError::Unsupported);
+        }
+        let image_boot = image::boot(&config, payload, info.timebase_hz, sstc)?;
         let image = image::prepare(
             &config,
             resources.images,

@@ -21,6 +21,8 @@ use std::{
 };
 std::thread_local! {
     pub static OWNER: Cell<usize> = const { Cell::new(0) };
+    // One bit per physical owner that completed its Sstc probe.
+    pub(super) static SSTC_OWNERS: Cell<usize> = const { Cell::new(usize::MAX) };
     pub static NOW: Cell<u64> = const { Cell::new(0) };
     pub(super) static CLOCK_READ: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
     pub(super) static WORKER_STARTS: Cell<u64> = const { Cell::new(0) };
@@ -214,6 +216,16 @@ impl HvArch for Arch {
     type Timer = Timer;
     type Smp = Smp;
     type IrqMask = Mask;
+    fn sstc_available_for_owners(owners: usize) -> bool {
+        owners != 0 && SSTC_OWNERS.with(|available| available.get() & owners == owners)
+    }
+    fn guest_sstc(dtb: &[u8], vcpus: u8) -> Result<bool> {
+        if dtb == [0xd1; 64] {
+            // Non-DTB fixture used by the scheduling and storage tests.
+            return Ok(false);
+        }
+        pauli_config::guest_dtb::riscv_sstc(dtb, vcpus).map_err(|_| HvError::InvalidImage)
+    }
     fn write_linux_dtb(
         config: &VmConfig,
         layout: pauli_config::GuestBoardLayout,

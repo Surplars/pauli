@@ -35,8 +35,10 @@ impl ArchVcpu for VirtualCpu {
                 if crate::fp::available() {
                     ctx.enable_floating_point().map_err(error)?;
                 }
-                if crate::sstc_available() {
-                    ctx.enable_sstc().map_err(error)?;
+                if boot.sstc {
+                    // Admission proved the entire VM's fixed owner set, which
+                    // need not include the management hart constructing this vCPU.
+                    ctx.enable_admitted_sstc();
                 }
             }
         }

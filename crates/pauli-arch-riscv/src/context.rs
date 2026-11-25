@@ -180,11 +180,28 @@ impl VCpuContext {
     }
 
     pub fn enable_sstc(&mut self) -> Result<(), crate::Error> {
-        if !crate::sstc_available() {
+        if !crate::local_sstc_available() {
             return Err(crate::Error::Unsupported);
         }
+        self.enable_admitted_sstc();
+        Ok(())
+    }
+
+    pub(crate) fn enable_admitted_sstc(&mut self) {
         self.sstc_enabled = 1;
         self.vstimecmp = u64::MAX;
+    }
+
+    /// A raw context can be prepared elsewhere. Check the physical owner before
+    /// FULL or the first resident LOAD can touch its compare register.
+    #[cfg(any(target_arch = "riscv64", test))]
+    pub(crate) fn check_sstc_owner(
+        &self,
+        available: impl FnOnce() -> bool,
+    ) -> Result<(), crate::Error> {
+        if self.sstc_enabled() && !available() {
+            return Err(crate::Error::Unsupported);
+        }
         Ok(())
     }
 

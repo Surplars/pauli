@@ -51,6 +51,8 @@ pub struct VcpuBoot {
     pub entry: usize,
     pub opaque: usize,
     pub payload: Payload,
+    /// Immutable guest timer contract, validated against its DTB and all pinned owners.
+    pub sstc: bool,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct RegisterAccess {
@@ -423,6 +425,8 @@ pub trait HvArch: Send + Sync + 'static {
     type Smp: ArchSmp;
     type IrqMask: LocalIrq;
     fn init(layout: GuestBoardLayout) -> core::result::Result<(), HvError>;
+    fn guest_sstc(dtb: &[u8], vcpus: u8) -> Result<bool>;
+    fn sstc_available_for_owners(owners: usize) -> bool;
     /// Architecture-specific guest discovery, not the physical board's device tree.
     fn write_linux_dtb(
         config: &VmConfig,
@@ -431,8 +435,7 @@ pub trait HvArch: Send + Sync + 'static {
         args: &str,
         out: &mut [u8],
     ) -> Result<usize>;
-    /// A board may stage a second canonical variant with host-supported extensions.
-    /// Reshaping preserves the original template's variant and checks all bytes.
+    /// Render the canonical Sstc variant independently of the rendering hart.
     fn write_extended_linux_dtb(
         config: &VmConfig,
         layout: GuestBoardLayout,

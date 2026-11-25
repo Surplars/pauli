@@ -115,8 +115,8 @@ pub unsafe fn prepare(hart: usize, dtb: usize) -> Result<&'static Wave8> {
     #[cfg(not(feature = "aia-guest-file"))]
     let aia_file = false;
     // SAFETY: validated single-hart OpenSBI board, before IRQ or dispatcher startup.
-    unsafe { pauli_arch_riscv::init_boot_sstc(1) };
-    pauli_core::trace::set_sstc_active(pauli_arch_riscv::sstc_available());
+    let sstc = unsafe { pauli_arch_riscv::init_local_sstc() };
+    pauli_core::trace::set_sstc_active(sstc);
     // SAFETY: validated Wave8 DT and boot privilege; only the S-domain and S-file are used.
     unsafe { install_devices()? };
     unsafe extern "C" {
@@ -138,7 +138,7 @@ pub unsafe fn prepare(hart: usize, dtb: usize) -> Result<&'static Wave8> {
         "Valence: HS hart 0, timebase {} Hz, {:?} guest, sstc={}, aia_file={}, stats={:#x}\r",
         TIMEBASE_HZ,
         payload,
-        pauli_arch_riscv::sstc_available(),
+        sstc,
         aia_file,
         &raw const pauli_core::trace::PAULI_HS_STATS as usize
     );

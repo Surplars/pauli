@@ -10,7 +10,7 @@ pub fn read_time() -> u64 {
     }
     now
 }
-// Keep the one boot-only CSR at an exact instruction address. A delegated
+// Keep the per-owner probe CSR at an exact instruction address. A delegated
 // illegal-instruction exception there returns false in the normal function ABI.
 core::arch::global_asm!(
     ".pushsection .text",
@@ -34,13 +34,13 @@ unsafe extern "C" {
     fn pauli_probe_stimecmp_denied();
 }
 
-pub(crate) unsafe fn disarm_boot_sstc() -> bool {
-    // SAFETY: the boot caller has installed the native exception vector, owns
-    // the compare with IRQs masked, and has no running worker or dispatcher.
-    crate::sstc_available() && unsafe { pauli_probe_stimecmp(u64::MAX) != 0 }
+pub(crate) unsafe fn probe_disarm_stimecmp() -> bool {
+    // SAFETY: the probing hart observed the local H gates, installed its native
+    // exception vector, and owns its compare with local interrupts masked.
+    unsafe { pauli_probe_stimecmp(u64::MAX) != 0 }
 }
 
-pub(super) fn recover_boot_compare(pc: &mut usize) -> bool {
+pub(super) fn recover_compare_probe(pc: &mut usize) -> bool {
     if *pc != pauli_probe_stimecmp as *const () as usize {
         return false;
     }
@@ -49,8 +49,8 @@ pub(super) fn recover_boot_compare(pc: &mut usize) -> bool {
 }
 
 pub fn set_sbi_timer(deadline: u64) -> super::sbi::SbiRet {
-    if crate::sstc_available() {
-        // SAFETY: this hart completed the guarded boot write before dispatch.
+    if crate::local_sstc_available() {
+        // SAFETY: this hart completed its own guarded compare write before dispatch.
         unsafe {
             core::arch::asm!(
                 "csrw {csr}, {val}",

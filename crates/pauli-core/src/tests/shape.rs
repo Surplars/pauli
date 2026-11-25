@@ -24,7 +24,7 @@ const ARGS: &str = "console=ttyS0 rdinit=/init";
 pub(super) fn template(slot: usize, vm: &mut VmConfig) -> BootImages {
     template_with_sstc(slot, vm, false)
 }
-fn template_with_sstc(slot: usize, vm: &mut VmConfig, sstc: bool) -> BootImages {
+pub(super) fn template_with_sstc(slot: usize, vm: &mut VmConfig, sstc: bool) -> BootImages {
     vm.memory_size = if slot == 0 { 64 << 20 } else { 96 << 20 };
     vm.aia = slot == 1;
     vm.image.initrd_source = (16 << 20) + 8192;
@@ -157,13 +157,13 @@ fn grown_plic_and_shrunken_aia_children_restore_their_own_topologies() {
     let peer = rt.manager.vm(3).unwrap();
     check_tree(&first, 8, 96, false);
     check_tree(&peer, 2, 64, true);
-    for (vm, sstc) in [(&first, false), (&peer, true)] {
+    for vm in [&first, &peer] {
         let bytes = dtb(vm);
         let tree = Fdt::new(&bytes).unwrap();
         for cpu in 0..vm.config.vcpus {
             let node = tree.find(&format!("/cpus/cpu@{cpu:x}")).unwrap().unwrap();
             let isa = node.property("riscv,isa-extensions").unwrap().unwrap();
-            assert_eq!(isa.split(|&b| b == 0).any(|ext| ext == b"sstc"), sstc);
+            assert!(isa.split(|&b| b == 0).any(|ext| ext == b"sstc"));
         }
     }
     check_tree(&rt.manager.vm(0).unwrap(), 1, 64, false);

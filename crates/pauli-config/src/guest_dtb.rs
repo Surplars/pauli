@@ -2,7 +2,9 @@
 //! Ownership/Lock Ordering: render into private host storage; no live guest or locks.
 //! Invariants: CPU nodes, interrupts, memory and initrd all describe the same VmConfig.
 use crate::{Error, GuestBoardLayout, MAX_GUEST_VCPUS, MmioRegion, VmConfig};
+mod sstc;
 mod writer;
+pub use sstc::riscv_sstc;
 use writer::{Hex, Writer};
 type Result<T = ()> = core::result::Result<T, Error>;
 const CPU_INTC: u32 = 0x10;

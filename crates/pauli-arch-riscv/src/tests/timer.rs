@@ -236,3 +236,65 @@ fn sstc_context_capability_gating_and_initial_deadline() {
     assert_eq!(ctx.vstimecmp, u64::MAX);
     init_sstc(false);
 }
+
+#[test]
+fn sstc_masks_require_each_owners_successful_local_probe() {
+    use crate::{owner_bit, owners_have_sstc, probe_owner_sstc};
+    use core::sync::atomic::AtomicUsize;
+
+    let owners = AtomicUsize::new(0);
+    let covers = |mask| owners_have_sstc(&owners, mask);
+    let local = |owner| covers(owner_bit(owner));
+    assert!(!covers(0));
+    assert!(!covers(0b110));
+    assert!(probe_owner_sstc(&owners, 1, true, || {
+        assert!(!local(1));
+        true
+    }));
+    assert!(local(1));
+    assert!(!local(0));
+    assert!(!covers(0b110));
+
+    assert!(!probe_owner_sstc(&owners, 2, false, || panic!(
+        "closed local gate attempted stimecmp"
+    )));
+    assert!(!probe_owner_sstc(&owners, 2, true, || false)); // WARL gates passed, compare access denied.
+    assert!(!local(2));
+    assert!(local(1));
+    assert!(!covers(0b110));
+
+    probe_owner_sstc(&owners, 2, true, || true);
+    assert!(covers(0b110));
+    assert!(!covers(0b111));
+    assert!(!covers(0));
+    probe_owner_sstc(&owners, 1, true, || false);
+    assert!(!local(1));
+    assert!(local(2));
+    assert!(!covers(0b110));
+
+    assert!(!probe_owner_sstc(&owners, usize::MAX, true, || panic!(
+        "invalid owner probed stimecmp"
+    )));
+    assert!(!local(usize::MAX));
+    let last = crate::MAX_CPUS.min(usize::BITS as usize) - 1;
+    probe_owner_sstc(&owners, last, true, || true);
+    assert!(covers((1usize << last) | (1 << 2)));
+}
+
+#[test]
+fn fresh_switch_checks_the_executing_owner_without_changing_the_guest_contract() {
+    let mut ctx = crate::VCpuContext::new();
+    assert_eq!(
+        ctx.check_sstc_owner(|| panic!("SBI guest needed no compare")),
+        Ok(())
+    );
+    ctx.enable_admitted_sstc();
+    ctx.vstimecmp = 123;
+    assert_eq!(
+        ctx.check_sstc_owner(|| false),
+        Err(crate::Error::Unsupported)
+    );
+    assert!(ctx.sstc_enabled());
+    assert_eq!(ctx.vstimecmp, 123);
+    assert_eq!(ctx.check_sstc_owner(|| true), Ok(()));
+}

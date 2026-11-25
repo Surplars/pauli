@@ -58,6 +58,9 @@ impl Resident {
         ctx: &mut VCpuContext,
         interval: Option<&mut pauli_core::arch::TickInterval>,
     ) -> Result<VmExit, crate::Error> {
+        if !self.state.loaded {
+            ctx.check_sstc_owner(crate::local_sstc_available)?;
+        }
         // SAFETY: same IRQ-masked physical owner; fail before taking an optional bank.
         unsafe { crate::vmid::prepare(ctx) }?;
         let external = ctx.virtual_aia && ctx.hvip & (1 << 10) != 0;

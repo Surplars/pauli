@@ -38,7 +38,12 @@ pub(crate) fn validate_embedded(config: &BootConfig) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn boot(config: &VmConfig, payload: Payload, timebase: u64) -> Result<VcpuBoot> {
+pub(super) fn boot(
+    config: &VmConfig,
+    payload: Payload,
+    timebase: u64,
+    sstc: bool,
+) -> Result<VcpuBoot> {
     let payload = match (payload, config.firmware) {
         (Payload::Linux, layout) => layout.map_or(Payload::Linux, Payload::Firmware),
         (Payload::Embedded, None) => Payload::Embedded,
@@ -59,6 +64,7 @@ pub(super) fn boot(config: &VmConfig, payload: Payload, timebase: u64) -> Result
         entry: usize::try_from(entry).map_err(|_| HvError::InvalidImage)?,
         opaque: usize::try_from(opaque).map_err(|_| HvError::InvalidImage)?,
         payload,
+        sstc,
     })
 }
 pub(super) fn prepare(

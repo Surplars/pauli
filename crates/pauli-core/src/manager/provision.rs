@@ -52,19 +52,36 @@ impl<A: HvArch> VmManager<A> {
         let pool = board.domain_pool().ok_or(HvError::Unsupported)?;
         self.admit(sponsor, &config)?;
         let (slot, reserved) = self.index.reserve(self.boot_count)?;
+        let info = board.info();
+        let owners = config.owner_mask(slot, info.boot_cpu, info.host_cpus);
+        let target_sstc = config.firmware.is_none() && A::sstc_available_for_owners(owners);
+        let source_sstc = source.guest_sstc();
+        let mut change = (reshape || source_sstc != target_sstc).then_some(shape::DtbChange {
+            source_sstc,
+            target_sstc,
+            optional: !reshape && !source_sstc,
+        });
         let metadata = Vm::<A>::vcpu_arena_bytes(config.vcpus)?
-            + if reshape { MAX_GUEST_DTB } else { 0 }
             + if config.disk.is_some() {
                 crate::backends::block::BUFFER_BYTES
             } else {
                 0
             };
+        let allocate =
+            |extra| pool.allocate::<Vm<A>>(&config, source.image.sources(), metadata + extra);
         let (resources, storage, receipt) =
-            pool.allocate::<Vm<A>>(&config, source.image.sources(), metadata)?;
+            match allocate(if change.is_some() { MAX_GUEST_DTB } else { 0 }) {
+                Err(HvError::Exhausted) if change.is_some_and(|plan| plan.optional) => {
+                    // A clone that fits with its original, safe discovery image is admissible.
+                    change = None;
+                    allocate(0)?
+                }
+                result => result?,
+            };
         let result = self.build_child(
             board,
             config,
-            reshape.then_some(&source.config),
+            change.map(|plan| (&source.config, plan)),
             slot,
             resources,
         );
@@ -89,13 +106,13 @@ impl<A: HvArch> VmManager<A> {
         &self,
         board: &B,
         mut config: VmConfig,
-        resize_from: Option<&VmConfig>,
+        change: Option<(&VmConfig, shape::DtbChange)>,
         slot: usize,
         mut resources: VmResources,
     ) -> Result<Vm<A>> {
         config.host_base = resources.ram.host_range().base() as u64;
-        if let Some(source) = resize_from {
-            shape::rebuild::<A, B>(board, source, &mut config, &mut resources)?;
+        if let Some((source, change)) = change {
+            shape::rebuild::<A, B>(board, source, &mut config, &mut resources, change)?;
         }
         Vm::build(
             board,

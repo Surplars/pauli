@@ -152,4 +152,10 @@ impl VmConfig {
             CpuAffinity::Workers => (boot + 1 + (slot + index) % (host_cpus - 1)) % host_cpus,
         }
     }
+    /// All native owners of this slot under the same prevalidated placement used by dispatch.
+    pub fn owner_mask(&self, slot: usize, boot: usize, host_cpus: usize) -> usize {
+        (0..usize::from(self.vcpus)).fold(0, |mask, index| {
+            mask | (1usize << self.owner(slot, index, boot, host_cpus))
+        })
+    }
 }
