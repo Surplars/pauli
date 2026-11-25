@@ -116,6 +116,44 @@ fn trusted_role_alone_selects_the_manager_and_private_service() {
 
 #[cfg(feature = "guest-control")]
 #[test]
+fn fixed_pair_is_reciprocal_in_both_manifest_and_guest_trees() {
+    let layout = GuestBoardLayout::DEFAULT;
+    for enabled in [false, true] {
+        let mut src = input(false);
+        src.manager = true;
+        src.peer_net = enabled;
+        let [mut manager_tree, mut service_tree] = [[0; MAX_GUEST_DTB]; 2];
+        let boot = super::super::config(
+            &src,
+            &header(7605976),
+            &mut manager_tree,
+            range(0x8023_0000, 48),
+            &mut service_tree,
+            layout,
+        )
+        .unwrap();
+        let published = BootConfig::decode(&boot.encode().unwrap()).unwrap();
+        for (slot, tree) in [&manager_tree, &service_tree].into_iter().enumerate() {
+            let vm = published.vms[slot].unwrap();
+            assert_eq!(vm.net_peer, enabled.then_some((1 - slot) as u8));
+            assert!(vm.disk.is_none() && !vm.net_uplink);
+            let fdt = Fdt::new(&tree[..vm.dtb_size as usize]).unwrap();
+            let port = fdt.find("/virtio@10002000").unwrap();
+            assert_eq!(port.is_some(), enabled);
+            if let Some(port) = port {
+                assert!(port.compatible("virtio,mmio").unwrap());
+                assert_eq!(
+                    port.reg().unwrap(),
+                    Some((layout.net.base, layout.net.size))
+                );
+                assert_eq!(port.u32("interrupts").unwrap(), Some(layout.net_irq));
+            }
+        }
+    }
+}
+
+#[cfg(feature = "guest-control")]
+#[test]
 fn aligned_manager_leaves_only_the_firmware_service_in_the_trailing_two_mib() {
     let mut input = input(false);
     let gib = 1usize << 30;
@@ -186,6 +224,7 @@ fn slots_lend_only_their_own_restart_images_ram_and_arena() {
         let input = External {
             manager,
             aia: false,
+            peer_net: false,
             image,
             initrd: Some(archive),
             ram: range(base as usize, 66 << 20),

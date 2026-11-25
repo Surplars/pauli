@@ -138,6 +138,28 @@ impl Monitor {
                 continue;
             }
             let state = vm.lifecycle.state();
+            if vm.config.net_peer.is_some() {
+                let snapshot = vm
+                    .devices
+                    .io
+                    .lock()
+                    .net
+                    .as_ref()
+                    .and_then(|net| net.peer_snapshot(runtime.manager.link()));
+                if let Some(s) = snapshot {
+                    self.terminal.output.host(format_args!(
+                        "VM {} peer-net up={} tx={} rx={} dropped={} full={} down={} queued={}\n",
+                        vm.slot + 1,
+                        s.up,
+                        s.tx,
+                        s.rx,
+                        s.dropped,
+                        s.full,
+                        s.down,
+                        s.queued
+                    ));
+                }
+            }
             self.report_faults(vm.slot + 1, vm.faults(), vm.join_fault());
             if let Some(exit) = vm.terminal_exit() {
                 self.terminal.output.host(format_args!(

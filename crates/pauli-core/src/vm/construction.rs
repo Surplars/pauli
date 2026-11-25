@@ -75,6 +75,9 @@ impl<A: HvArch> Vm<A> {
             return Err(HvError::Unsupported);
         }
         let image_boot = image::boot(&config, payload, info.timebase_hz, sstc)?;
+        if let Payload::Firmware(layout) = image_boot.payload {
+            resources.ram = resources.ram.for_firmware(layout)?;
+        }
         let image = image::prepare(
             &config,
             resources.images,

@@ -207,7 +207,23 @@ impl<A: HvArch> VmManager<A> {
             // No new epoch exists to attribute this failure to.
             vm.activation_failed(vm.epoch(), error);
         })?;
-        vm.start(board, epoch, self.link(), A::Timer::now())
+        let result = vm.start(board, epoch, self.link(), A::Timer::now());
+        self.refresh_peer_carrier(&vm);
+        result
+    }
+    pub(crate) fn receive_peer(&self, hint: pauli_devices::net_link::RxReady) {
+        if let Some(vm) = self.available(hint.slot()) {
+            vm.service_peer(hint, self.link());
+        }
+    }
+    fn refresh_peer_carrier(&self, source: &Vm<A>) {
+        if let Some(peer) = source
+            .config
+            .net_peer
+            .and_then(|slot| self.available(usize::from(slot)))
+        {
+            peer.peer_carrier(self.link());
+        }
     }
     fn next_epoch(&self) -> Result<u32> {
         self.epoch
@@ -221,16 +237,22 @@ impl<A: HvArch> VmManager<A> {
         board.service_devices(now);
         for vm in self.vms() {
             if vm.lifecycle.stopping() {
+                let joining_peer = vm.config.net_peer.is_some() && !vm.lifecycle.joined();
                 match vm.try_join(now, self.link()) {
-                    Ok(true) if vm.lifecycle.reset_requested() && !vm.config.stop_on_reset => {
-                        let _ = self.start(board, vm.slot);
+                    Ok(true) => {
+                        if joining_peer {
+                            self.refresh_peer_carrier(&vm);
+                        }
+                        if vm.lifecycle.reset_requested() && !vm.config.stop_on_reset {
+                            let _ = self.start(board, vm.slot);
+                        }
                     }
                     // The CPU side has joined, but I/O is not reusable. Keep
                     // the VM stopped at the barrier and surface the error once.
                     Err(error) => vm.fail_join(error),
                     _ => {}
                 }
-            } else if vm.devices.service(A::Timer::now, self.link()).is_err() {
+            } else if vm.devices.service(A::Timer::now, self).is_err() {
                 vm.request_stop(true, false);
             }
             vm.deliver_wakes();

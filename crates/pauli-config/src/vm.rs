@@ -70,8 +70,7 @@ impl VmConfig {
                 return Err(Error::Memory);
             }
             let rom_pages = u64::from(layout.rx_pages) + u64::from(layout.ro_pages);
-            // Disk/network backends write guest RAM outside the CPU page table.
-            // This static firmware ABI only exposes console, interrupt controller and RTC.
+            // A fixed network peer uses checked CPU copies into the firmware data pages.
             if layout.rx_pages == 0
                 || self.image.kernel_size == 0
                 || rom_pages > self.image.kernel_memory_size.div_ceil(FIRMWARE_PAGE)
@@ -82,7 +81,6 @@ impl VmConfig {
                 || self.disk.is_some()
                 || self.writable
                 || self.net_uplink
-                || self.net_peer.is_some()
                 || self.vcpus != 1
             {
                 return Err(Error::Image);

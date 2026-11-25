@@ -11,6 +11,7 @@ fn input(archive: bool) -> External<'static> {
     External {
         manager: false,
         aia: false,
+        peer_net: false,
         image: range(0x8900_0000, 7282696),
         initrd: archive.then(|| range(0x8100_0000, 0x074a970b)),
         ram: range(0xa000_0000, 512 << 20),
@@ -78,7 +79,8 @@ fn wave8_manifest_and_guest_tree_use_different_address_spaces() {
             "/reserved-memory",
             "/cpus/cpu@1",
             "/imsics@28000000",
-            "/virtio_mmio@10001000",
+            "/virtio@10001000",
+            "/virtio@10002000",
         ] {
             assert!(tree.find(path).unwrap().is_none());
         }
@@ -265,8 +267,16 @@ fn packaged_external_guest_plan() {
         fs::read(std::env::var_os("WAVE8_EXTERNAL_DTB").expect("WAVE8_EXTERNAL_DTB")).unwrap();
     let handoff = crate::handoff::validate_blob(0, &native).unwrap();
     let grant = handoff.external.expect("external guest");
-    let native_pool = Fdt::new(&native)
+    let native_tree = Fdt::new(&native).unwrap();
+    let peer_net = native_tree
+        .find("/chosen")
         .unwrap()
+        .unwrap()
+        .unique_property("openion,peer-net")
+        .unwrap()
+        .is_some();
+    assert_eq!(grant.peer_net, peer_net);
+    let native_pool = native_tree
         .nodes()
         .map(|node| node.unwrap())
         .find(|node| {
@@ -301,6 +311,7 @@ fn packaged_external_guest_plan() {
         (grant.ram.base() as u64, linux_bytes)
     );
     assert_eq!(vm.aia, grant.aia);
+    assert_eq!(vm.net_peer, peer_net.then_some(1));
     if grant.manager {
         let service = boot.vms[1].unwrap();
         assert_eq!(
@@ -308,6 +319,7 @@ fn packaged_external_guest_plan() {
             (vm.host_base + linux_bytes, 64 << 10)
         );
         assert!(!service.aia);
+        assert_eq!(service.net_peer, peer_net.then_some(0));
     }
     assert_eq!(
         (boot.management, vm.name()),
@@ -317,6 +329,7 @@ fn packaged_external_guest_plan() {
         )
     );
     let tree = Fdt::new(&guest_tree[..vm.dtb_size as usize]).unwrap();
+    assert_eq!(tree.find("/virtio@10002000").unwrap().is_some(), peer_net);
     assert!(tree.find("/reserved-memory").unwrap().is_none());
     assert!(tree.nodes().all(|node| {
         !node

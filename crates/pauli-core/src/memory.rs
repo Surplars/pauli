@@ -2,6 +2,8 @@
 //! Ownership/Lock Ordering: one device owner performs guest CPU copies; no DMA here.
 //! Invariants: every access is checked and volatile; destructive writes require join.
 use crate::{HvError, Result};
+use core::ops::Range;
+use pauli_config::{FIRMWARE_PAGE, FirmwareLayout, MAX_GUEST_DTB};
 use pauli_devices::memory::GuestMemory;
 use pauli_hal::mem::PhysRange;
 mod copy;
@@ -39,6 +41,7 @@ impl Arena {
 pub struct GuestRam {
     host: PhysRange,
     guest: usize,
+    writable: Range<usize>,
 }
 // SAFETY: this exclusive handle owns foreign bytes, not Rust references; native
 // owners synchronize accesses through the VM device owner, never physical DMA.
@@ -52,7 +55,25 @@ impl GuestRam {
         guest
             .checked_add(host.size())
             .ok_or(HvError::InvalidMemory)?;
-        Ok(Self { host, guest })
+        Ok(Self {
+            host,
+            guest,
+            writable: 0..host.size(),
+        })
+    }
+    /// Apply the firmware stage-2 data-page permissions before publishing a device handle.
+    pub(crate) fn for_firmware(mut self, layout: FirmwareLayout) -> Result<Self> {
+        let page = FIRMWARE_PAGE as usize;
+        let rom = (usize::from(layout.rx_pages) + usize::from(layout.ro_pages)) * page;
+        let dtb = self
+            .len()
+            .checked_sub(MAX_GUEST_DTB)
+            .ok_or(HvError::InvalidMemory)?;
+        if layout.rx_pages == 0 || !self.len().is_multiple_of(page) || rom >= dtb {
+            return Err(HvError::InvalidMemory);
+        }
+        self.writable = rom..dtb;
+        Ok(self)
     }
     pub fn host_range(&self) -> PhysRange {
         self.host
@@ -63,20 +84,26 @@ impl GuestRam {
     pub fn len(&self) -> usize {
         self.host.size()
     }
-    fn address(&self, gpa: u64, len: usize) -> Option<usize> {
+    fn address(&self, gpa: u64, len: usize, write: bool) -> Option<usize> {
         let offset = usize::try_from(gpa).ok()?.checked_sub(self.guest)?;
-        if offset.checked_add(len)? > self.len() {
+        let end = offset.checked_add(len)?;
+        let allowed = if write {
+            self.writable.clone()
+        } else {
+            0..self.len()
+        };
+        if offset < allowed.start || end > allowed.end {
             return None;
         }
         self.host.base().checked_add(offset)
     }
 }
 impl GuestMemory for GuestRam {
-    fn check(&self, gpa: u64, len: usize, _write: bool) -> bool {
-        self.address(gpa, len).is_some()
+    fn check(&self, gpa: u64, len: usize, write: bool) -> bool {
+        self.address(gpa, len, write).is_some()
     }
     fn read(&self, gpa: u64, output: &mut [u8]) -> bool {
-        let Some(host) = self.address(gpa, output.len()) else {
+        let Some(host) = self.address(gpa, output.len(), false) else {
             return false;
         };
         // SAFETY: the checked foreign RAM is retained; output is an exclusive Rust slice.
@@ -86,7 +113,7 @@ impl GuestMemory for GuestRam {
         true
     }
     fn write(&mut self, gpa: u64, input: &[u8]) -> bool {
-        let Some(host) = self.address(gpa, input.len()) else {
+        let Some(host) = self.address(gpa, input.len(), true) else {
             return false;
         };
         // SAFETY: checked retained foreign bytes, serialized host writer, no DMA alias.

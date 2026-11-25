@@ -77,6 +77,9 @@ impl Queue {
             return Err(());
         }
         self.next = self.next.wrapping_add(1);
+        // The driver arms callbacks then rechecks used.idx. Publish the index
+        // before reading suppression so either side observes the other's store.
+        fence(Ordering::SeqCst);
         let mut flags = [0; 2];
         if !mem.read(self.avail, &mut flags) {
             return Err(());

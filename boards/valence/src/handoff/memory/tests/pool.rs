@@ -48,6 +48,15 @@ fn dedicated_pool_and_guest_ram_are_independent_optional_grants() {
 }
 
 #[test]
+fn fixed_peer_ports_exclude_even_a_disabled_pool_declaration() {
+    let mut f = manager_pool(BASE, SIZE);
+    f.chosen.push(("openion,peer-net", vec![]));
+    assert_eq!(pool(&f), Err(Error::Property));
+    f.nodes[1].push(("status", b"disabled\0".to_vec()));
+    assert_eq!(pool(&f), Err(Error::Property));
+}
+
+#[test]
 fn optional_pool_needs_a_live_external_manager_and_a_unique_role() {
     let mut f = manager_pool(BASE, SIZE);
     f.chosen.pop();

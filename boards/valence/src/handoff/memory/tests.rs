@@ -96,6 +96,31 @@ impl Fixture {
 }
 
 #[test]
+fn peer_net_is_a_unique_boolean_for_an_external_manager() {
+    const FLAG: &str = "openion,peer-net";
+    let admitted = |f: &Fixture| {
+        let blob = f.blob();
+        granted(Fdt::new(&blob).unwrap()).map(|g| g.map(|g| g.peer_net))
+    };
+    let mut f = Fixture::default();
+    assert_eq!(admitted(&f), Ok(Some(false)));
+    f.chosen.push((FLAG, vec![]));
+    assert_eq!(admitted(&f), Err(Error::Property));
+    f.chosen.push(("openion,guest-role", b"manager\0".to_vec()));
+    assert_eq!(admitted(&f), Ok(Some(true)));
+    f.chosen.push((FLAG, vec![]));
+    assert_eq!(admitted(&f), Err(Error::Property));
+    f.chosen.pop();
+    for malformed in [vec![0], vec![0; 4], b"true\0".to_vec()] {
+        f.chosen[1].1 = malformed;
+        assert_eq!(admitted(&f), Err(Error::Property));
+    }
+    f.chosen = vec![(FLAG, vec![])];
+    f.nodes.clear();
+    assert_eq!(admitted(&f), Err(Error::Property));
+}
+
+#[test]
 fn external_with_and_without_initrd_and_stock_embedded() {
     let mut f = Fixture::default();
     for initrd in [false, true] {

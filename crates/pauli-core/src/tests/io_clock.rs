@@ -26,11 +26,8 @@ fn untimed_interrupt_mmio_and_unmapped_addresses_do_not_sample_time() {
     let vm = m.vm(0).unwrap();
     let no_clock = || panic!("an untimed access sampled TIME");
     let plic = GuestBoardLayout::DEFAULT.plic.base;
-    assert_eq!(
-        vm.devices.access(word(plic, None), no_clock, m.link()),
-        Some(0)
-    );
-    assert_eq!(vm.devices.access(word(0, None), no_clock, m.link()), None);
+    assert_eq!(vm.devices.access(word(plic, None), no_clock, m), Some(0));
+    assert_eq!(vm.devices.access(word(0, None), no_clock, m), None);
 }
 
 #[test]
@@ -41,13 +38,13 @@ fn unchanged_device_polls_do_not_sample_guest_irq_contexts() {
     let layout = GuestBoardLayout::DEFAULT;
     let samples = || vm.devices.irqs.lock().samples.get();
     let now = || 10;
-    let poll = || vm.devices.service(now, m.link()).unwrap();
+    let poll = || vm.devices.service(now, m).unwrap();
     let initial = samples();
     for _ in 0..8 {
         poll();
         assert!(
             vm.devices
-                .access(word(layout.rtc.base, None), now, m.link())
+                .access(word(layout.rtc.base, None), now, m)
                 .is_some()
         );
     }
@@ -60,7 +57,7 @@ fn unchanged_device_polls_do_not_sample_guest_irq_contexts() {
         width: 1,
         write: Some(1),
     };
-    assert!(vm.devices.access(ier, now, m.link()).is_some());
+    assert!(vm.devices.access(ier, now, m).is_some());
     assert!(vm.devices.receive_console(b'x', now));
     let raised = samples();
     assert!(raised > initial);
@@ -76,13 +73,13 @@ fn maintenance_uses_the_live_clock_even_if_requested_before_a_guest_rtc_write() 
     let rtc = GuestBoardLayout::DEFAULT.rtc.base;
     let ticks = Cell::new(10);
     let now = || ticks.get();
-    let poll = || vm.devices.service(now, m.link()).unwrap();
+    let poll = || vm.devices.service(now, m).unwrap();
     // A manager pass can start before a worker, but service the VM after it.
     // Reusing the manager's original 10 us would wrap the RTC's elapsed delta.
     ticks.set(100);
     assert_eq!(
         vm.devices
-            .access(word(rtc + ALARM_LOW, Some(200_000)), now, m.link()),
+            .access(word(rtc + ALARM_LOW, Some(200_000)), now, m),
         Some(0)
     );
     ticks.set(150);

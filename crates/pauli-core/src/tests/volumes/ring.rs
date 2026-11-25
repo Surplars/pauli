@@ -34,7 +34,7 @@ pub(super) fn access(
             write,
         },
         || 0,
-        f.runtime.manager.link(),
+        &f.runtime.manager,
     )
 }
 pub(super) fn write(f: &Fixture, vm: &Vm<Arch>, byte: u8) {

@@ -152,7 +152,7 @@ impl ExtendedFixture {
                 .vm(0)
                 .unwrap()
                 .devices
-                .access(access, || NOW.with(|n| n.get()), manager.link()),
+                .access(access, || NOW.with(|n| n.get()), manager),
             Some(0)
         );
     }

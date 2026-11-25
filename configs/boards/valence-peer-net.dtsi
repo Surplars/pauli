@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+// Append after valence-linux.dtsi and valence-manager.dtsi, without a domain
+// pool. The fixed manager and service each get a private VirtIO-net endpoint.
+&{/chosen} {
+    openion,peer-net;
+};

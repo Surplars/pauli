@@ -59,6 +59,12 @@ On first load or cold restart it copies each template and zeros only the gaps
 access is confined to this inactive window; live guest I/O keeps its exact-width
 volatile accesses. Stopping or joining a VM alone does not erase its memory.
 
+VirtIO uses the same firmware write boundaries as stage 2. Devices may read
+the complete guest assignment and write only the region between the firmware
+image pages and the trailing DTB. Two fixed boot guests can exchange Ethernet
+frames through bounded HS-owned queues. Their RAM remains private.
+[Inter-VM transport](inter-vm-transport.md)
+
 The manager publishes VM epochs and commits joins; vCPU owners can request
 stop or fault. Global management does not lock around device service,
 console writes or guest entry. Per-vCPU

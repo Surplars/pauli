@@ -57,6 +57,7 @@ fn each_reg(n: &Node<'_>, mut visit: impl FnMut(PhysRange) -> Result<()>) -> Res
 struct Grants {
     ram: Option<PhysRange>,
     pool: Option<PhysRange>,
+    pool_declared: bool,
 }
 
 fn validate_pool(pool: PhysRange) -> Result<()> {
@@ -81,7 +82,6 @@ fn validate_pool(pool: PhysRange) -> Result<()> {
 // Collect both explicit loans first, independent of sibling and DDR-bank order.
 fn grants(tree: Fdt<'_>) -> Result<Grants> {
     let mut loans = Grants::default();
-    let mut saw_pool = false;
     let mut reserved = false;
     let mut saw_reserved = false;
     for n in tree.nodes() {
@@ -108,7 +108,7 @@ fn grants(tree: Fdt<'_>) -> Result<Grants> {
             let guest = n.compatible(GUEST_COMPAT)?;
             if pool {
                 n.unique_property("status")?;
-                if core::mem::replace(&mut saw_pool, true)
+                if core::mem::replace(&mut loans.pool_declared, true)
                     || compatible != Some(b"openion,wave8-domain-pool\0")
                 {
                     return Err(Error::Reservation);
@@ -162,9 +162,10 @@ fn external<'a>(
     let args = chosen.property("openion,guest-bootargs")?;
     let role = chosen.unique_property("openion,guest-role")?;
     let irq = chosen.unique_property("openion,guest-irq")?;
+    let peer_net = chosen.unique_property("openion,peer-net")?;
     let Some(raw) = chosen.unique_property("openion,guest-image")? else {
         // A stock Linux initrd is not an instruction to start a VM.
-        return if args.is_none() && role.is_none() && irq.is_none() {
+        return if args.is_none() && role.is_none() && irq.is_none() && peer_net.is_none() {
             Ok(None)
         } else {
             Err(Error::Property)
@@ -180,6 +181,11 @@ fn external<'a>(
     let aia = match irq {
         None | Some(b"plic\0") => false,
         Some(b"aia\0") => true,
+        _ => return Err(Error::Property),
+    };
+    let peer_net = match peer_net {
+        None => false,
+        Some([]) if manager && !loans.pool_declared => true,
         _ => return Err(Error::Property),
     };
     let image = reg(raw)?;
@@ -223,6 +229,7 @@ fn external<'a>(
         bootargs,
         manager,
         aia,
+        peer_net,
     }))
 }
 

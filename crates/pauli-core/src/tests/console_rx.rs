@@ -39,7 +39,7 @@ fn reg(f: &Fixture, offset: usize, write: Option<usize>) -> usize {
         write,
     };
     vm.devices
-        .access(access, || NOW.with(|n| n.get()), f.runtime.manager.link())
+        .access(access, || NOW.with(|n| n.get()), &f.runtime.manager)
         .unwrap()
 }
 

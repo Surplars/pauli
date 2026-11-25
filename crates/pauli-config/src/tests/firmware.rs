@@ -32,6 +32,20 @@ fn small_firmware_roundtrips_beside_linux() {
     assert!(decoded.vms[1].unwrap().firmware.is_none());
 }
 #[test]
+fn reciprocal_fixed_peer_roundtrips_between_firmware_and_linux() {
+    let mut cfg = pair();
+    cfg.vms[0].as_mut().unwrap().net_peer = Some(1);
+    assert_eq!(cfg.validate(), Err(Error::Network));
+    cfg.vms[1].as_mut().unwrap().net_peer = Some(0);
+    let decoded = BootConfig::decode(&cfg.encode().unwrap()).unwrap();
+    assert_eq!(
+        decoded.vms[0].unwrap().firmware,
+        cfg.vms[0].unwrap().firmware
+    );
+    assert_eq!(decoded.vms[0].unwrap().net_peer, Some(1));
+    assert_eq!(decoded.vms[1].unwrap().net_peer, Some(0));
+}
+#[test]
 fn invalid_permissions_shapes_and_sources_never_enter_the_manifest() {
     for change in [
         (|v: &mut VmConfig| v.memory_size -= 1) as fn(&mut VmConfig),
@@ -42,6 +56,7 @@ fn invalid_permissions_shapes_and_sources_never_enter_the_manifest() {
         |v| v.image.kernel_size = v.image.kernel_memory_size + 1,
         |v| v.image.initrd_size = 1,
         |v| v.disk = Some(0),
+        |v| v.writable = true,
         |v| v.net_uplink = true,
         |v| v.net_peer = Some(1),
         |v| v.vcpus = 2,

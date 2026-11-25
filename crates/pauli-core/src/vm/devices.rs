@@ -4,16 +4,17 @@
 use super::irq_bank::IrqBank;
 use crate::{
     HvError, Result,
-    arch::{GuestIo, IrqRegion, RegisterAccess, VirtualIrqChip},
+    arch::{GuestIo, HvArch, IrqRegion, RegisterAccess, VirtualIrqChip},
     backends::{block::Block, console::Console, mailbox::Mailbox, net::Net, rtc::Rtc},
     board::Board,
     bus::{DeviceId, MmioBus},
+    manager::VmManager,
     memory::{Arena, GuestRam},
     trace::Tracer,
 };
 use core::sync::atomic::{AtomicUsize, Ordering};
 use pauli_config::{BootConfig, GuestBoardLayout, GuestIrqConfig, GuestIrqController, VmConfig};
-use pauli_devices::net_link::Link;
+use pauli_devices::net_link::{Link, RxReady};
 use pauli_hal::{
     device::{CompletionEvent, MmioAccess},
     sync::SpinLock,
@@ -243,7 +244,11 @@ impl<I: VirtualIrqChip> VmDevices<I> {
         }
         accepted
     }
-    pub fn service(&self, clock: impl FnOnce() -> u64, link: &SpinLock<Link>) -> Result<()> {
+    pub fn service<A: HvArch<Irq = I>>(
+        &self,
+        clock: impl FnOnce() -> u64,
+        manager: &VmManager<A>,
+    ) -> Result<()> {
         let mut io = self.io.lock();
         // All device time samples are ordered by this VM's I/O lock. A poll
         // queued behind another hart must not rewind its UART or RTC.
@@ -256,35 +261,31 @@ impl<I: VirtualIrqChip> VmDevices<I> {
         if let Some(block) = block {
             block.service(ram, now);
         }
-        if let Some(net) = net {
-            net.service(ram, link)?;
-        }
+        let peer = match net {
+            Some(net) => net.service(ram, manager.link())?,
+            None => None,
+        };
         self.levels(&mut io, 0);
+        drop(io);
+        if let Some(peer) = peer {
+            manager.receive_peer(peer);
+        }
         Ok(())
     }
-    pub fn access(
+    pub fn access<A: HvArch<Irq = I>>(
         &self,
         access: MmioAccess,
         clock: impl FnOnce() -> u64,
-        link: &SpinLock<Link>,
+        manager: &VmManager<A>,
     ) -> Option<usize> {
-        self.access_from(None, access, clock, link)
+        self.access_io(None, access, clock, manager, None).0
     }
-    pub(crate) fn access_from(
+    fn access_io<A: HvArch<Irq = I>>(
         &self,
         origin: Option<u8>,
         access: MmioAccess,
         clock: impl FnOnce() -> u64,
-        link: &SpinLock<Link>,
-    ) -> Option<usize> {
-        self.access_io(origin, access, clock, link, None).0
-    }
-    fn access_io(
-        &self,
-        origin: Option<u8>,
-        access: MmioAccess,
-        clock: impl FnOnce() -> u64,
-        link: &SpinLock<Link>,
+        manager: &VmManager<A>,
         service: Option<&mut MonitorDeadline>,
     ) -> (Option<usize>, bool, bool) {
         // Only the issuer is certain to sample the chip before its next entry.
@@ -310,6 +311,7 @@ impl<I: VirtualIrqChip> VmDevices<I> {
         self.levels(&mut io, exclude); // Latch timeout before destructive RBR/IIR reads.
         let mut console_tx = false;
         let mut console_full = false;
+        let mut peer = None;
         let value = match device {
             DeviceId::Uart if access.width == 1 || access.width == 4 => {
                 let value = io.console.access(offset, access.write);
@@ -323,10 +325,16 @@ impl<I: VirtualIrqChip> VmDevices<I> {
                 .block
                 .as_mut()
                 .and_then(|b| b.access(offset, access.write)),
-            DeviceId::Net => io
-                .net
-                .as_mut()
-                .and_then(|n| n.access(offset, access.width, access.write, link)),
+            DeviceId::Net => {
+                let IoState { ram, net, .. } = &mut *io;
+                net.as_mut().and_then(|net| {
+                    let value = net.access(offset, access.width, access.write, manager.link())?;
+                    if net.notified(offset, access.write) {
+                        peer = net.service(ram, manager.link()).ok()?;
+                    }
+                    Some(value)
+                })
+            }
             DeviceId::Rtc if access.width == 4 => io.rtc.access(offset, access.write),
             _ => None,
         };
@@ -342,6 +350,10 @@ impl<I: VirtualIrqChip> VmDevices<I> {
             }
         }
         self.levels(&mut io, exclude);
+        drop(io);
+        if let Some(peer) = peer {
+            manager.receive_peer(peer);
+        }
         (value, console_tx, console_full)
     }
     pub fn stop(&self, now: u64, link: &SpinLock<Link>) -> Result<bool> {
@@ -443,24 +455,24 @@ impl MonitorDeadline {
         }
     }
 }
-pub(crate) struct DeviceIo<'a, I: VirtualIrqChip, R: Tracer> {
-    pub devices: &'a VmDevices<I>,
+pub(crate) struct DeviceIo<'a, A: HvArch, R: Tracer> {
+    pub devices: &'a VmDevices<A::Irq>,
     pub origin: u8,
-    pub link: &'a SpinLock<Link>,
+    pub manager: &'a VmManager<A>,
     pub now: fn() -> u64,
     pub trace: &'a mut R,
     pub console_tx: bool,
     pub console_full: bool,
     pub service: Option<&'a mut MonitorDeadline>,
 }
-impl<I: VirtualIrqChip, R: Tracer> GuestIo for DeviceIo<'_, I, R> {
+impl<A: HvArch, R: Tracer> GuestIo for DeviceIo<'_, A, R> {
     fn mmio(&mut self, access: MmioAccess) -> Option<usize> {
         self.trace.on_mmio(access.gpa, access.write.is_some());
         let (value, console_tx, console_full) = self.devices.access_io(
             Some(self.origin),
             access,
             self.now,
-            self.link,
+            self.manager,
             self.service.as_deref_mut(),
         );
         self.console_tx |= console_tx;
@@ -470,5 +482,36 @@ impl<I: VirtualIrqChip, R: Tracer> GuestIo for DeviceIo<'_, I, R> {
     fn register(&mut self, cpu: u8, access: RegisterAccess) -> Option<usize> {
         self.devices
             .change_irqs(1usize << self.origin, |chip| chip.register(cpu, access))
+    }
+}
+
+impl<A: HvArch> super::Vm<A> {
+    /// The sender and link are already unlocked. Pin matching RAM and the
+    /// device incarnation under the destination lock before processing RX.
+    pub(crate) fn service_peer(&self, hint: RxReady, link: &SpinLock<Link>) {
+        let mut io = self.devices.io.lock();
+        if self.epoch() != hint.epoch() || !self.lifecycle.can_enter() {
+            return;
+        }
+        let IoState { ram, net, .. } = &mut *io;
+        if net
+            .as_mut()
+            .is_some_and(|net| net.receive_peer(ram, link, hint))
+        {
+            self.devices.levels(&mut io, 0);
+            drop(io);
+            self.deliver_wakes();
+        }
+    }
+    pub(crate) fn peer_carrier(&self, link: &SpinLock<Link>) {
+        let mut io = self.devices.io.lock();
+        if self.lifecycle.can_enter()
+            && let Some(net) = &mut io.net
+        {
+            net.refresh_carrier(link);
+            self.devices.levels(&mut io, 0);
+            drop(io);
+            self.deliver_wakes();
+        }
     }
 }

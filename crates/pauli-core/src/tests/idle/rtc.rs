@@ -28,7 +28,7 @@ pub(super) fn write(f: &Fixture, slot: usize, address: u64, value: usize) {
         m.vm(slot)
             .unwrap()
             .devices
-            .access(access, || NOW.with(|n| n.get()), m.link()),
+            .access(access, || NOW.with(|n| n.get()), m),
         Some(0)
     );
 }

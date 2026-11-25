@@ -170,6 +170,25 @@ VM ID and epoch with `paulictl start ID --epoch E`, then
 `paulictl stop ID --epoch E --wait` and `paulictl destroy ID --epoch E`.
 Destroy releases the child's allocation and its quota charge.
 
+## Optional Ethernet link to the fixed service
+
+For a manager and a network-capable firmware service, append
+`valence-peer-net.dtsi` after `valence-linux.dtsi` and
+`valence-manager.dtsi`. The native `/chosen/openion,peer-net` property is a
+single empty boolean. It requires an external manager and excludes every
+`openion,wave8-domain-pool` declaration, including a disabled one. A fixed
+peer port belongs to its boot slot and cannot be cloned.
+[Peer-net fragment](../configs/boards/valence-peer-net.dtsi)
+
+Each guest gets a VirtIO-MMIO Ethernet port at GPA `0x10002000`; frames
+travel between manager and service through HS-owned buffers. The board
+retains its GEM controller. The Wave9 Pauli A/B delivery kernel has
+`CONFIG_VIRTIO_MENU` disabled. To bind the guest port in Linux, enable
+`CONFIG_VIRTIO_MENU`, `CONFIG_VIRTIO_MMIO` and `CONFIG_VIRTIO_NET`.
+Service firmware must post receive buffers in its writable RAM. The bundled
+heartbeat firmware only uses UART.
+[Transport contract and QEMU measurements](inter-vm-transport.md)
+
 ## What Linux receives
 
 The hypervisor copies private VM RAM from validated sources and **generates**

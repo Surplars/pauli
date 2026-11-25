@@ -108,6 +108,70 @@ fn packet(seed: u8) -> [u8; 60] {
     data[13] = 0xb5;
     data
 }
+
+#[test]
+fn a_committed_batch_is_counted_once_and_cannot_outlive_either_port_or_reset() {
+    assert_eq!(DEPTH, 16);
+    let mut link = Link::new();
+    let a = link.bind(0, 1, 1).unwrap();
+    link.activate(a).unwrap();
+    let mut sender = link.backend(a).unwrap();
+    sender.transmit(&packet(0)).unwrap();
+    assert_eq!(sender.ready(), None);
+    let b = link.bind(1, 2, 0).unwrap();
+    link.activate(b).unwrap();
+    let mut sender = link.backend(a).unwrap();
+    for seed in 0..=16 {
+        sender.transmit(&packet(seed)).unwrap();
+    }
+    let hint = sender.ready().unwrap();
+    assert_eq!((hint.slot(), hint.epoch()), (1, 2));
+    let sender = link.snapshot(a).unwrap();
+    assert_eq!(
+        (sender.tx, sender.full, sender.down, sender.dropped),
+        (16, 1, 1, 2)
+    );
+    assert_eq!(link.snapshot(b).unwrap().queued, 16);
+    let mut out = [0; FRAME_MAX];
+    for i in 0..16 {
+        assert_eq!(
+            link.receiver(b, hint).unwrap().receive(&mut out),
+            Ok(Some(60))
+        );
+        assert_eq!(&out[..60], &packet(i));
+    }
+    assert!(link.receiver(b, hint).is_none());
+    assert_eq!(link.snapshot(b).unwrap().rx, 16);
+    let mut sender = link.backend(a).unwrap();
+    sender.transmit(&packet(17)).unwrap();
+    let before_reset = sender.ready().unwrap();
+    link.backend(b).unwrap().transmit(&packet(18)).unwrap();
+    link.reset(a).unwrap();
+    assert_eq!(link.snapshot(a).unwrap().queued, 0);
+    link.backend(a).unwrap().transmit(&packet(19)).unwrap();
+    assert!(link.receiver(b, before_reset).is_none());
+    let mut sender = link.backend(a).unwrap();
+    sender.transmit(&packet(20)).unwrap();
+    let before_restart = sender.ready().unwrap();
+    link.retire(a).unwrap();
+    let fresh = link.bind(0, 3, 1).unwrap();
+    link.activate(fresh).unwrap();
+    assert_eq!(link.snapshot(fresh).unwrap().tx, 0);
+    let mut sender = link.backend(fresh).unwrap();
+    sender.transmit(&packet(21)).unwrap();
+    let current = sender.ready().unwrap();
+    assert!(link.receiver(b, before_restart).is_none());
+    assert_eq!(
+        link.receiver(b, current).unwrap().receive(&mut out),
+        Ok(Some(60))
+    );
+    assert_eq!(&out[..60], &packet(21));
+    link.retire(b).unwrap();
+    let replacement = link.bind(1, 4, 0).unwrap();
+    link.activate(replacement).unwrap();
+    link.backend(fresh).unwrap().transmit(&packet(22)).unwrap();
+    assert!(link.receiver(replacement, current).is_none());
+}
 fn tx(mem: &mut Memory, data: &[u8]) {
     mem.put(TX, &[0; HEADER]);
     mem.put(TX + HEADER as u64, data);

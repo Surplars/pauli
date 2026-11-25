@@ -11,6 +11,23 @@ impl VirtioNet {
         backend: &mut impl NetBackend,
         budget: usize,
     ) {
+        self.transfer(mem, backend, budget, &[1, 0]);
+    }
+    pub fn service_receive(
+        &mut self,
+        mem: &mut impl GuestMemory,
+        backend: &mut impl NetBackend,
+        budget: usize,
+    ) {
+        self.transfer(mem, backend, budget, &[0]);
+    }
+    fn transfer(
+        &mut self,
+        mem: &mut impl GuestMemory,
+        backend: &mut impl NetBackend,
+        budget: usize,
+        directions: &[usize],
+    ) {
         if self.status & (OK | BROKEN | FAILED) != OK || budget == 0 {
             return;
         }
@@ -20,11 +37,11 @@ impl VirtioNet {
         }
         // A fixed bound per direction prevents an always-ready TX guest from
         // starving receive or the host terminal. No formatting/allocation here.
-        for direction in [1, 0] {
+        for &direction in directions {
             if !self.queues[direction].ready {
                 continue;
             }
-            for _ in 0..budget.min(4) {
+            for _ in 0..budget.min(16) {
                 match self.one(mem, backend, direction) {
                     Ok(true) => {}
                     Ok(false) => break,

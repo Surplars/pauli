@@ -58,6 +58,7 @@ fn linux(input: &External<'_>, header: &[u8]) -> Result<VmConfig> {
     vm.aia = input.aia;
     vm.host_stats = input.manager;
     vm.control_events = input.manager;
+    vm.net_peer = input.peer_net.then_some(1);
     let file_size = input.image.size() as u64;
     vm.image = VmImage {
         kernel_source: input.image.base() as u64,
@@ -129,6 +130,7 @@ fn config(
     let mut dtb_size = vm.dtb_size;
     let peer = if input.manager {
         let mut peer = service(code, vm.host_base + vm.memory_size)?;
+        peer.net_peer = input.peer_net.then_some(0);
         render(&mut peer, "", peer_tree, layout)?;
         // DTB buffers have a fixed slot stride; only their generated prefixes
         // appear as restart images. Linux arguments are never copied to the peer.

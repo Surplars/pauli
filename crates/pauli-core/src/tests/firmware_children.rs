@@ -29,6 +29,8 @@ fn memory(f: &Fixture, id: VmId, write: Option<u8>) -> (PhysRange, [u8; 3]) {
     let vm = f.runtime.manager.vm(id.0 as usize - 1).unwrap();
     let base = vm.config.guest_base;
     let ram = &mut vm.devices.io.lock().ram;
+    assert!(!ram.check(base, 1, true));
+    assert!(!ram.write(base + vm.config.guest_dtb_offset(), &[0]));
     if let Some(value) = write {
         assert!(ram.write(base + PAGE_SIZE as u64, &[value]));
     }
@@ -38,6 +40,89 @@ fn memory(f: &Fixture, id: VmId, write: Option<u8>) -> (PhysRange, [u8; 3]) {
         assert!(ram.read(base + offset, core::slice::from_mut(byte)));
     }
     (ram.host_range(), bytes) // Firmware entry, first writable byte, immutable DTB.
+}
+
+#[test]
+fn fixed_peer_firmware_devices_can_only_write_whole_spans_in_data_pages() {
+    let f = Fixture::with_config(1, [1, 1], 1, |slot, vm| {
+        vm.net_peer = Some((1 - slot) as u8);
+        if slot == 1 {
+            vm.memory_size = RAM;
+            vm.firmware = Some(FirmwareLayout {
+                rx_pages: 1,
+                ro_pages: 1,
+            });
+            vm.image.kernel_memory_size = 2 * PAGE_SIZE as u64;
+        }
+    });
+    let vm = f.runtime.manager.vm(1).unwrap();
+    let base = vm.config.guest_base;
+    let page = PAGE_SIZE as u64;
+    let data = base + 2 * page;
+    let dtb = base + vm.config.guest_dtb_offset();
+    let end = base + RAM;
+    {
+        let mut io = vm.devices.io.lock();
+        let ram = &mut io.ram;
+        // RX, RO and the entire trailing DTB reservation remain readable.
+        for (address, len) in [
+            (base, 1),
+            (base + page, 1),
+            (data - 1, 2),
+            (dtb - 1, 2),
+            (dtb, 1),
+            (end - 1, 1),
+        ] {
+            let mut before = [0; 2];
+            let mut after = [0; 2];
+            assert!(ram.check(address, len, false));
+            assert!(ram.read(address, &mut before[..len]));
+            assert!(!ram.check(address, len, true));
+            assert!(!ram.write_payload(address, &[0xab, 0xcd][..len]));
+            assert!(ram.read(address, &mut after[..len]));
+            assert_eq!(before, after);
+        }
+        assert!(ram.check(data, (dtb - data) as usize, true));
+        for address in [data, dtb - 1] {
+            assert!(ram.write(address, &[0x6a]));
+            let mut byte = [0];
+            assert!(ram.read(address, &mut byte));
+            assert_eq!(byte, [0x6a]);
+        }
+        for (address, valid) in [
+            (base, false),
+            (data - 1, false),
+            (data, true),
+            (dtb, true),
+            (dtb + 1, false),
+        ] {
+            assert_eq!(ram.check(address, 0, true), valid);
+            assert_eq!(ram.write(address, &[]), valid);
+        }
+        for write in [false, true] {
+            assert!(!ram.check(data, usize::MAX, write));
+            assert!(!ram.check(base - 1, 1, write));
+            assert!(!ram.check(end, 1, write));
+            assert!(!ram.check(u64::MAX, 2, write));
+        }
+    }
+    // A paired Linux endpoint retains write access through both ends of its RAM.
+    let linux = f.runtime.manager.vm(0).unwrap();
+    let mut io = linux.devices.io.lock();
+    assert!(io.ram.check(
+        linux.config.guest_base,
+        linux.config.memory_size as usize,
+        true
+    ));
+    assert!(io.ram.write(linux.config.guest_base, &[1]));
+    assert!(
+        io.ram
+            .write(linux.config.guest_base + linux.config.memory_size - 1, &[2])
+    );
+    drop(io);
+    let mut host = Target(&f.runtime);
+    assert_eq!(host.create(None, TEMPLATE, spec()), Err(Error::Unsupported));
+    assert_eq!(host.snapshot().count(), 2);
 }
 
 #[test]

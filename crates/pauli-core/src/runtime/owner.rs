@@ -303,7 +303,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             let mut io = DeviceIo {
                 devices: &vm.devices,
                 origin: slot.index,
-                link: self.manager.link(),
+                manager: &self.manager,
                 now: A::Timer::now,
                 trace: &mut local.tracer,
                 console_tx: false,

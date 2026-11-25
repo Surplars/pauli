@@ -41,6 +41,8 @@ pub(super) struct External<'a> {
     /// Selects the management boot topology, not an RPC capability.
     pub manager: bool,
     pub aia: bool,
+    /// Reciprocal copied ports for the two fixed boot VMs.
+    pub peer_net: bool,
 }
 
 pub(super) const RAM_BASE: usize = 0x8020_0000;
