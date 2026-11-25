@@ -13,12 +13,22 @@ pub struct VmExit {
 }
 impl VmExit {
     #[cfg(any(target_arch = "riscv64", test))]
-    pub(crate) fn source(cause: usize, wfi: bool, mmio: bool) -> pauli_core::arch::ExitSource {
+    pub(crate) fn source(
+        cause: usize,
+        action: Option<crate::sbi::SbiAction>,
+        wfi: bool,
+        mmio: bool,
+        native_sstc: bool,
+    ) -> pauli_core::arch::ExitSource {
         use pauli_core::arch::ExitSource;
         match cause {
+            Self::SUPERVISOR_TIMER if native_sstc => ExitSource::SstcTimer,
             Self::SUPERVISOR_TIMER => ExitSource::Timer,
             Self::SUPERVISOR_EXTERNAL => ExitSource::External,
             Self::SUPERVISOR_SOFTWARE => ExitSource::Software,
+            Self::VS_ECALL if matches!(action, Some(crate::sbi::SbiAction::SetTimer { .. })) => {
+                ExitSource::SbiTimer
+            }
             Self::VS_ECALL => ExitSource::SupervisorCall,
             _ if wfi => ExitSource::Wfi,
             _ if mmio => ExitSource::Mmio,
@@ -56,7 +66,26 @@ mod tests {
             (VmExit::SUPERVISOR_EXTERNAL, false, false, External),
             (VmExit::SUPERVISOR_SOFTWARE, false, false, Software),
         ] {
-            assert_eq!(VmExit::source(cause, wfi, mmio), source);
+            assert_eq!(VmExit::source(cause, None, wfi, mmio, false), source);
         }
+        use crate::sbi::SbiAction::{Resume, SetTimer};
+        assert_eq!(
+            VmExit::source(
+                VmExit::VS_ECALL,
+                Some(SetTimer { deadline: 40 }),
+                false,
+                false,
+                true
+            ),
+            SbiTimer
+        );
+        assert_eq!(
+            VmExit::source(VmExit::VS_ECALL, Some(Resume), false, false, true),
+            SupervisorCall
+        );
+        assert_eq!(
+            VmExit::source(VmExit::SUPERVISOR_TIMER, None, false, false, true),
+            SstcTimer
+        );
     }
 }

@@ -129,7 +129,6 @@ pub unsafe fn prepare(hart: usize, dtb: usize) -> Result<&'static Wave8> {
     let aia_file = false;
     // SAFETY: validated single-hart OpenSBI board, before IRQ or dispatcher startup.
     let sstc = unsafe { pauli_arch_riscv::init_local_sstc() };
-    pauli_core::trace::set_sstc_active(sstc);
     // SAFETY: validated Wave8 DT and boot privilege; only the S-domain and S-file are used.
     unsafe { install_devices()? };
     unsafe extern "C" {

@@ -201,7 +201,11 @@ impl VirtualCpu {
         self.external_pending = external;
         self.ctx.set_external_pending(external);
     }
-    fn refresh(&mut self, now: u64) {
+    pub(crate) fn timer_asserted(&self) -> bool {
+        self.ctx.hvip & bits::VSTIP != 0
+    }
+    fn refresh(&mut self, now: u64) -> bool {
+        let asserted = self.timer_asserted();
         let timer_pending = self.ctx.refresh_timer(&mut self.timer, now);
         let software = self.ctx.hvip & bits::VSSIP;
         self.ctx.hvip = software
@@ -214,6 +218,7 @@ impl VirtualCpu {
             | if software != 0 { bits::SSIP } else { 0 }
             | if timer_pending { bits::STIP } else { 0 };
         self.ctx.set_external_pending(self.external_pending);
+        !asserted && self.timer_asserted()
     }
     fn enabled_pending(&self) -> bool {
         self.ctx.vsie & self.ctx.vsip & (bits::SSIP | bits::STIP | bits::SEIP) != 0
@@ -224,22 +229,23 @@ impl VirtualCpu {
     /// foreign control/fence/migration. Retire all visited CPUs before RAM reuse.
     pub unsafe fn run(&mut self, options: RunOptions<'_>) -> Result<ManagedExit, Error> {
         // SAFETY: forward the same exclusive switch contract.
-        unsafe { self.run_with_interval(options, None) }
+        unsafe { self.run_sampled(options, None) }
     }
-    pub(crate) unsafe fn run_with_interval(
+    pub(crate) unsafe fn run_sampled(
         &mut self,
         options: RunOptions<'_>,
-        interval: Option<&mut pauli_core::arch::TickInterval>,
+        mut sample: Option<&mut pauli_core::arch::GuestSample>,
     ) -> Result<ManagedExit, Error> {
         if options.host_deadline == u64::MAX {
             return Err(Error::InvalidDeadline);
         }
+        let mut vtimer_irq = false;
         let physical_deadline = if self.ctx.sstc_enabled() {
             // Hardware evaluates vstimecmp at entry. IPI and external setters
             // already publish their own levels, and VSTIP injection stays clear.
             options.host_deadline
         } else {
-            self.refresh(crate::host::timer::read_time());
+            vtimer_irq = self.refresh(crate::host::timer::read_time());
             self.timer.physical_deadline(options.host_deadline)
         };
         // SAFETY: caller owns this CPU's compare endpoint through the complete interval.
@@ -252,6 +258,9 @@ impl VirtualCpu {
                 unsafe { crate::entry::publish_guest_code() };
             });
         // SAFETY: exclusive context and immutable assigned backing; timer is armed.
+        let interval = sample
+            .as_deref_mut()
+            .and_then(pauli_core::arch::GuestSample::timing);
         let raw = unsafe {
             match options.resident {
                 Some(bank) => bank.run(&mut self.ctx, interval),
@@ -272,10 +281,22 @@ impl VirtualCpu {
             self.external_pending = self.ctx.vsip & bits::SEIP != 0;
         }
         let now = crate::host::timer::read_time();
-        self.refresh(now);
+        vtimer_irq |= self.refresh(now);
+        let timer_asserted = self.timer_asserted();
         // SAFETY: raw is this run's trusted trap snapshot; callback observes checked accesses only.
         let (disposition, action, wfi, mmio) =
             unsafe { self.decode_exit(raw, options.space, options.io, now) };
+        if let Some(sample) = sample {
+            // An immediately expired SBI timer may raise the level during decode.
+            sample.vtimer_irq = vtimer_irq || (!timer_asserted && self.timer_asserted());
+            sample.source = VmExit::source(
+                raw.cause,
+                action,
+                wfi,
+                mmio,
+                raw.cause == VmExit::SUPERVISOR_TIMER && crate::local_sstc_available(),
+            );
+        }
         Ok(ManagedExit {
             raw,
             disposition,

@@ -10,6 +10,9 @@ pub struct MmioRegion {
     pub size: u64,
 }
 
+const IMSIC_FILE_BYTES: u64 = 4096;
+const APLIC_BYTES: u64 = 0x4000;
+
 /// Highest implemented IMSIC interrupt identity. Identity zero is reserved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -32,6 +35,25 @@ impl ImsicIds {
     }
 }
 
+/// Guest-visible controller apertures after selecting exactly one interrupt topology.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuestIrqController {
+    Legacy {
+        region: MmioRegion,
+    },
+    Advanced {
+        wired: MmioRegion,
+        message: MmioRegion,
+        ids: ImsicIds,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GuestIrqConfig {
+    pub vcpus: u8,
+    pub controller: GuestIrqController,
+}
+
 /// Virtual platform ABI independent of the physical board or interrupt routing.
 /// IMSIC reserves one file page per possible vCPU; the DTB exposes actual files only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,9 +74,41 @@ pub struct GuestBoardLayout {
 }
 
 impl GuestBoardLayout {
+    /// Resolve the apertures shared by the device tree, MMIO bus and IRQ chip.
+    pub fn irq_config(self, vcpus: u8, advanced: bool) -> Result<GuestIrqConfig, crate::Error> {
+        use crate::Error;
+        if !(1..=crate::MAX_GUEST_VCPUS).contains(&vcpus) {
+            return Err(Error::Vcpus);
+        }
+        let controller = if advanced {
+            let wired = self.aplic;
+            let message = self.imsic_files(vcpus).ok_or(Error::Dtb)?;
+            let wired_end = wired.base.checked_add(wired.size).ok_or(Error::Dtb)?;
+            let files_end = message.base.checked_add(message.size).ok_or(Error::Dtb)?;
+            if wired.size < APLIC_BYTES
+                || wired.base % 4 != 0
+                || message.base % IMSIC_FILE_BYTES != 0
+                || (wired.base < files_end && message.base < wired_end)
+            {
+                return Err(Error::Dtb);
+            }
+            GuestIrqController::Advanced {
+                wired,
+                message,
+                ids: self.imsic_ids,
+            }
+        } else {
+            let region = self.plic_contexts(vcpus).ok_or(Error::Dtb)?;
+            if region.base % 4 != 0 || region.base.checked_add(region.size).is_none() {
+                return Err(Error::Dtb);
+            }
+            GuestIrqController::Legacy { region }
+        };
+        Ok(GuestIrqConfig { vcpus, controller })
+    }
     /// Only the files belonging to this VM are decoded and advertised.
     pub fn imsic_files(self, vcpus: u8) -> Option<MmioRegion> {
-        let size = u64::from(vcpus) * 4096;
+        let size = u64::from(vcpus) * IMSIC_FILE_BYTES;
         (size != 0 && size <= self.imsic.size).then_some(MmioRegion {
             base: self.imsic.base,
             size,
@@ -107,11 +161,11 @@ impl GuestBoardLayout {
         },
         aplic: MmioRegion {
             base: 0x0c00_0000,
-            size: 0x4000,
+            size: APLIC_BYTES,
         },
         imsic: MmioRegion {
             base: 0x2800_0000,
-            size: 4096 * crate::MAX_GUEST_VCPUS as u64,
+            size: IMSIC_FILE_BYTES * crate::MAX_GUEST_VCPUS as u64,
         },
         imsic_ids: ImsicIds::Ids255,
         uart_irq: 10,

@@ -72,3 +72,25 @@ pub(crate) fn pump<A: HvArch, B: Board>(
 pub(crate) fn poll<A: HvArch, B: Board>(runtime: &VmRuntime<A, B>, ticket: Ticket) -> Poll {
     runtime.rpc.lock().poll(ticket)
 }
+pub(crate) fn poll_traced<A: HvArch, B: Board, R: crate::trace::Tracer>(
+    runtime: &VmRuntime<A, B>,
+    ticket: Ticket,
+    tracer: &mut R,
+) -> Poll {
+    if !R::TRACE_EXITS {
+        return poll(runtime, ticket);
+    }
+    let (outcome, operation) = runtime.rpc.lock().poll_operation(ticket);
+    if let Poll::Complete(reply) = outcome
+        && reply.error == 0
+    {
+        match operation {
+            Some(pauli_control::Operation::MailSend(_)) => tracer.on_mail(true),
+            // Empty dequeue is exactly zero on the wire. A present zero-length
+            // message still carries the presence bit.
+            Some(pauli_control::Operation::MailRecv) if reply.value != 0 => tracer.on_mail(false),
+            _ => {}
+        }
+    }
+    outcome
+}

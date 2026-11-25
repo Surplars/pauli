@@ -46,12 +46,10 @@ pub fn boot<B: Board, A: HvArch>(board: &'static B, storage: &'static BootStorag
     }
     let mut monitor = Monitor::new();
     monitor.welcome(runtime);
-    if B::COLLECT_HS_STATS {
-        run_boot_loop(
-            runtime,
-            &mut monitor,
-            Dispatcher::with_tracer(StatsTracer::global()),
-        );
+    if B::COLLECT_HS_STATS
+        && let Some(trace) = StatsTracer::registered_owner(board.info().boot_cpu)
+    {
+        run_boot_loop(runtime, &mut monitor, Dispatcher::with_tracer(trace));
     } else {
         run_boot_loop(runtime, &mut monitor, Dispatcher::new());
     }

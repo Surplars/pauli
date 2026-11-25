@@ -12,7 +12,7 @@ use crate::{
     trace::Tracer,
 };
 use core::sync::atomic::{AtomicUsize, Ordering};
-use pauli_config::{BootConfig, GuestBoardLayout, VmConfig};
+use pauli_config::{BootConfig, GuestBoardLayout, GuestIrqConfig, GuestIrqController, VmConfig};
 use pauli_devices::net_link::Link;
 use pauli_hal::{
     device::{CompletionEvent, MmioAccess},
@@ -56,7 +56,9 @@ pub struct VmDevices<I: VirtualIrqChip> {
     /// Guest vCPU lanes whose owner must resample the IRQ chip.
     pub(crate) wake: AtomicUsize,
     bus: MmioBus,
-    pub(super) layout: GuestBoardLayout,
+    pub(super) irq_config: GuestIrqConfig,
+    /// UART, block, net and RTC lines in the same order as IoState::levels.
+    irq_sources: [u32; 4],
     pub(super) lanes: usize,
 }
 impl<I: VirtualIrqChip> VmDevices<I> {
@@ -73,8 +75,22 @@ impl<I: VirtualIrqChip> VmDevices<I> {
     ) -> Result<Self> {
         let hz = board.info().timebase_hz;
         let layout = board.layout();
+        let irq_config = layout
+            .irq_config(config.vcpus, config.aia)
+            .map_err(|_| HvError::InvalidDevice)?;
+        let irq_sources = [
+            layout.uart_irq,
+            layout.block_irq,
+            layout.net_irq,
+            layout.rtc_irq,
+        ];
+        for (index, source) in irq_sources.iter().enumerate() {
+            if !(1..32).contains(source) || irq_sources[..index].contains(source) {
+                return Err(HvError::InvalidDevice);
+            }
+        }
         let block = bind_block(board, boot, config, slot, links, hz, arena)?;
-        let bus = create_bus(layout, config, &ram)?;
+        let bus = create_bus(layout, config, irq_config.controller, &ram)?;
         let native = if config.net_uplink {
             Some(board.resolve_uplink_net()?)
         } else {
@@ -86,7 +102,7 @@ impl<I: VirtualIrqChip> VmDevices<I> {
             Some(rtc) => rtc.unix_ns()?,
             None => 0,
         };
-        let chip = I::create_with_imsic_ids(config.vcpus, config.aia, layout.imsic_ids)?;
+        let chip = I::create_configured(irq_config)?;
         // Binding the peer link is the final fallible step: no failed VM can
         // leave behind an endpoint that a later peer would see as active.
         let net = Net::bind(slot, epoch, config, &links.peer, native)?;
@@ -103,7 +119,8 @@ impl<I: VirtualIrqChip> VmDevices<I> {
             irqs: SpinLock::new(IrqBank::new(chip, config)),
             wake: AtomicUsize::new(0),
             bus,
-            layout,
+            irq_config,
+            irq_sources,
             lanes: usize::MAX >> (usize::BITS - u32::from(config.vcpus)),
         })
     }
@@ -122,14 +139,8 @@ impl<I: VirtualIrqChip> VmDevices<I> {
         if levels == io.levels {
             return;
         }
-        let sources = [
-            self.layout.uart_irq,
-            self.layout.block_irq,
-            self.layout.net_irq,
-            self.layout.rtc_irq,
-        ];
         self.change_irqs(exclude, |chip| {
-            for (i, source) in sources.into_iter().enumerate() {
+            for (i, source) in self.irq_sources.into_iter().enumerate() {
                 if levels[i] != io.levels[i] {
                     chip.set_level(source, levels[i]);
                 }
@@ -199,7 +210,7 @@ impl<I: VirtualIrqChip> VmDevices<I> {
                         // chip lock, not a timeout or overrun from an earlier byte.
                         #[cfg(feature = "selftest")]
                         let rise = (accepted && !before && level).then(&clock);
-                        chip.set_level(self.layout.uart_irq, level);
+                        chip.set_level(self.irq_sources[0], level);
                         #[cfg(feature = "selftest")]
                         if let Some(ticks) = rise {
                             // Publish the sampled value before the chip lock releases the edge.
@@ -355,18 +366,12 @@ fn bind_block<B: Board>(
         arena,
     )?))
 }
-fn create_bus(layout: GuestBoardLayout, config: &VmConfig, ram: &GuestRam) -> Result<MmioBus> {
-    let sources = [
-        layout.uart_irq,
-        layout.block_irq,
-        layout.net_irq,
-        layout.rtc_irq,
-    ];
-    for (index, source) in sources.iter().enumerate() {
-        if !(1..32).contains(source) || sources[..index].contains(source) {
-            return Err(HvError::InvalidDevice);
-        }
-    }
+fn create_bus(
+    layout: GuestBoardLayout,
+    config: &VmConfig,
+    controller: GuestIrqController,
+    ram: &GuestRam,
+) -> Result<MmioBus> {
     let mut bus = MmioBus::new();
     bus.register(layout.uart, DeviceId::Uart)?;
     bus.register(layout.rtc, DeviceId::Rtc)?;
@@ -376,17 +381,14 @@ fn create_bus(layout: GuestBoardLayout, config: &VmConfig, ram: &GuestRam) -> Re
     if config.net_peer.is_some() || config.net_uplink {
         bus.register(layout.net, DeviceId::Net)?;
     }
-    if config.aia {
-        bus.register(layout.aplic, DeviceId::Irq(IrqRegion::Wired))?;
-        let files = layout
-            .imsic_files(config.vcpus)
-            .ok_or(HvError::InvalidDevice)?;
-        bus.register(files, DeviceId::Irq(IrqRegion::Message))?;
-    } else {
-        let region = layout
-            .plic_contexts(config.vcpus)
-            .ok_or(HvError::InvalidDevice)?;
-        bus.register(region, DeviceId::Irq(IrqRegion::Legacy))?;
+    match controller {
+        GuestIrqController::Legacy { region } => {
+            bus.register(region, DeviceId::Irq(IrqRegion::Legacy))?;
+        }
+        GuestIrqController::Advanced { wired, message, .. } => {
+            bus.register(wired, DeviceId::Irq(IrqRegion::Wired))?;
+            bus.register(message, DeviceId::Irq(IrqRegion::Message))?;
+        }
     }
     bus.validate_ram(ram.guest_base(), ram.len())?;
     Ok(bus)

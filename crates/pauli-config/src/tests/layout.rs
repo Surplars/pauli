@@ -3,7 +3,10 @@
 //! Invariants: peripheral regions are disjoint; APLIC replaces, not augments, PLIC.
 
 use super::*;
-use crate::{GuestBoardLayout, MAX_GUEST_VCPUS, MmioRegion, overlaps};
+use crate::{
+    GuestBoardLayout, GuestIrqConfig, GuestIrqController, ImsicIds, MAX_GUEST_VCPUS, MmioRegion,
+    overlaps,
+};
 
 #[test]
 fn default_board_abi() {
@@ -48,6 +51,77 @@ fn interrupt_apertures_stop_at_the_guest_topology() {
     board.plic.size -= 1;
     assert_eq!(board.plic_contexts(16), None);
     assert_eq!(board.plic_contexts(15), Some(board.plic));
+}
+
+#[test]
+fn irq_config_selects_board_apertures_and_only_the_vms_files() {
+    let mut board = GuestBoardLayout::DEFAULT;
+    board.plic.base = 0x0900_0000;
+    board.aplic.base = 0x0a00_0000;
+    board.imsic.base = 0x2500_0000;
+    for vcpus in [1, 3, MAX_GUEST_VCPUS] {
+        assert_eq!(
+            board.irq_config(vcpus, false),
+            Ok(GuestIrqConfig {
+                vcpus,
+                controller: GuestIrqController::Legacy { region: board.plic }
+            })
+        );
+        for ids in [ImsicIds::Ids127, ImsicIds::Ids255] {
+            board.imsic_ids = ids;
+            assert_eq!(
+                board.irq_config(vcpus, true),
+                Ok(GuestIrqConfig {
+                    vcpus,
+                    controller: GuestIrqController::Advanced {
+                        wired: board.aplic,
+                        message: MmioRegion {
+                            base: board.imsic.base,
+                            size: u64::from(vcpus) * 4096
+                        },
+                        ids,
+                    }
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn irq_config_rejects_invalid_counts_and_selected_windows() {
+    let layout = GuestBoardLayout::DEFAULT;
+    for vcpus in [0, MAX_GUEST_VCPUS + 1, u8::MAX] {
+        for advanced in [false, true] {
+            assert_eq!(layout.irq_config(vcpus, advanced), Err(Error::Vcpus));
+        }
+    }
+    let mut board = layout;
+    board.plic.size = 0x20_1007; // Last byte of context 1's claim register is missing.
+    assert_eq!(board.irq_config(2, false), Err(Error::Dtb));
+    assert!(board.irq_config(1, false).is_ok());
+    assert!(board.irq_config(2, true).is_ok());
+    for base in [1, u64::MAX - 3] {
+        board.plic.base = base;
+        assert_eq!(board.irq_config(1, false), Err(Error::Dtb));
+    }
+
+    board = layout;
+    board.imsic.size = 2 * 4096 - 1;
+    assert_eq!(board.irq_config(2, true), Err(Error::Dtb));
+    assert!(board.irq_config(1, true).is_ok());
+    assert!(board.irq_config(2, false).is_ok());
+    for base in [1, u64::MAX - 4095, board.aplic.base] {
+        board.imsic.base = base;
+        assert_eq!(board.irq_config(1, true), Err(Error::Dtb));
+    }
+    board = layout;
+    board.aplic.size -= 1;
+    assert_eq!(board.irq_config(1, true), Err(Error::Dtb));
+    assert!(board.irq_config(1, false).is_ok());
+    board = layout;
+    board.aplic.base = board.imsic.base + 4096;
+    assert!(board.irq_config(1, true).is_ok());
+    assert_eq!(board.irq_config(2, true), Err(Error::Dtb));
 }
 
 #[test]

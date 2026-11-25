@@ -131,17 +131,22 @@ impl Queue {
         true
     }
     pub fn poll(&mut self, ticket: Ticket) -> Poll {
+        self.poll_operation(ticket).0
+    }
+    /// Return the original operation only to the consumer of this generation's completed reply.
+    pub fn poll_operation(&mut self, ticket: Ticket) -> (Poll, Option<crate::Operation>) {
         let Some(slot) = self.slots[ticket.index]
             .as_ref()
             .filter(|slot| slot.work.ticket == ticket)
         else {
-            return Poll::Cancelled;
+            return (Poll::Cancelled, None);
         };
         if let Phase::Done(result) = slot.phase {
+            let operation = slot.work.request.operation;
             self.slots[ticket.index] = None;
-            Poll::Complete(result)
+            (Poll::Complete(result), Some(operation))
         } else {
-            Poll::Pending
+            (Poll::Pending, None)
         }
     }
     pub fn cancel(&mut self, ticket: Ticket) {

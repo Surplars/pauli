@@ -9,7 +9,7 @@ stay in the ISA crate. `pauli-core` must not import it.
 | --- | --- |
 | `ArchVcpu` | One pinned-owner `run(RunOptions)` and validated secondary boot; scalar exit/control results |
 | `Stage2Space` | Retained private root/arena, checked mappings and executable entry validation |
-| `VirtualIrqChip` | Per-VM controller state, per-vCPU pending delivery and explicit quiescence |
+| `VirtualIrqChip` | Construct per-VM controller state from `GuestIrqConfig`, deliver pending interrupts per vCPU and quiesce on retirement |
 | `ArchTimer`, `ArchSmp`, `LocalIrq` | Absolute native deadlines, physical CPU owners, safe wake/idle and interrupt restoration |
 | `HvArch::write_linux_dtb` | Canonical bounded guest description shared with the launcher, or explicitly unsupported; advertise admitted CPU/IRQ topology, RAM, initrd and board timebase |
 | `Resident`, `Mailbox` | Put native banks before handoff; epoch-bound remote request/completion and translation retirement |

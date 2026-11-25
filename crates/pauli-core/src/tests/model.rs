@@ -177,7 +177,7 @@ pub struct Irqs {
     pub fail_load: bool,
 }
 impl VirtualIrqChip for Irqs {
-    fn create(_cpus: u8, _advanced: bool) -> Result<Self> {
+    fn create_configured(_irq: pauli_config::GuestIrqConfig) -> Result<Self> {
         if REJECT_NEXT_IRQ_CHIP.with(Cell::take) {
             return Err(HvError::Unsupported);
         }

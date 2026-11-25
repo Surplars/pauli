@@ -140,7 +140,7 @@ impl ArchVcpu for Cpu {
         self.retired = false;
         self.steps += 1;
         TickInterval::measure(
-            sample.as_deref_mut().map(|s| &mut s.interval),
+            sample.as_deref_mut().and_then(GuestSample::timing),
             Timer::now,
             || {
                 NOW.with(|now| {

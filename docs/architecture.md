@@ -173,6 +173,35 @@ A default dispatcher uses
 An integration can supply an owner-local tracer; it must not allocate,
 block or print in its callbacks.
 
+### Reading per-owner HS counters
+
+Valence collects `PAULI_HS_STATS` at boot. On QEMU virt, build with
+`--features selftest` to collect the same counters. Halt all harts and use
+the matching ELF to dump 8,256 bytes starting at `PAULI_HS_STATS`. Run
+`python tools/hs-stats.py dump.bin` to show each registered owner and the
+aggregate counts. The decoder also accepts a 128-byte v1 capture with its
+original tick counters. [Capture commands](../tools/hs-stats.py)
+
+The v2 header is 64 bytes. Its masks use logical owner indices. Each
+128-byte record identifies the physical hart, which may differ from the
+owner index. A hart ID of `u64::MAX` marks an unregistered slot. A trimmed
+capture ends at byte `64 + 128 * host_cpus`. Individual words are atomic.
+For consistent totals, stop all harts between callbacks.
+
+| Counter | What increments it |
+| --- | --- |
+| `vm_exits` | One completed guest exit. Its classification contributes to one of the six exit buckets below. |
+| `wfi_exits`, `mmio_exits` | A decoded guest WFI or emulated MMIO access. |
+| `sbi_timer_exits` | A guest SBI set-timer call accepted by the hypervisor. |
+| `sstc_timer_exits` | An HS supervisor timer interrupt during guest execution on an owner using native `stimecmp`. |
+| `ext_irqs`, `other_exits` | A native external interrupt during guest execution, or any remaining guest exit, respectively. |
+| `vtimer_irqs` | A software-injected virtual timer level changes from clear to pending. Direct timer deliveries inside VS are invisible to HS. |
+| `idle_wfi` | A native owner returns from idle WFI. |
+| `mail_sends`, `mail_recvs` | The issuing vCPU collects a successful send reply or a receive reply containing a message. A zero-byte message counts. |
+
+`last_scause`, `last_sepc` and `last_stval` belong to the last exit on
+each owner. The decoder prints them per hart and sums only event counts.
+
 ## Bootstrap without a management OS
 
 The firmware/launcher supplies the first manifest, Image, initrd and DTB

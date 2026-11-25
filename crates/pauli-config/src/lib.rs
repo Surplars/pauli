@@ -134,7 +134,7 @@ pub mod loader;
 mod validation;
 mod vm;
 mod wire;
-pub use layout::{GuestBoardLayout, ImsicIds, MmioRegion};
+pub use layout::{GuestBoardLayout, GuestIrqConfig, GuestIrqController, ImsicIds, MmioRegion};
 
 #[cfg(test)]
 #[macro_use]

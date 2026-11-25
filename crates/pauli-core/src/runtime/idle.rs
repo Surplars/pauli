@@ -229,6 +229,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 arch::TickInterval::measure(sample, A::Timer::now, || A::Smp::idle());
                 #[cfg(feature = "selftest")]
                 self.observe_idle(owner, !timed, guest_compare, sample);
+                local.tracer.on_idle_wfi();
                 if R::MEASURE_ELAPSED {
                     local.tracer.on_idle_end(interval.end, interval.elapsed());
                 }

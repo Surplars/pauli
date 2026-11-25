@@ -182,11 +182,7 @@ impl<A: HvArch> Vm<A> {
                 Some(rtc) => rtc.unix_ns()?,
                 None => 0,
             };
-            let chip = A::Irq::create_with_imsic_ids(
-                self.config.vcpus,
-                self.config.aia,
-                self.devices.layout.imsic_ids,
-            )?;
+            let chip = A::Irq::create_configured(self.devices.irq_config)?;
             for slot in self.cpus() {
                 let cpu = A::Vcpu::create(&self.space, slot.index, epoch, &self.config, self.boot)?;
                 slot.replace_joined(cpu, epoch)?;

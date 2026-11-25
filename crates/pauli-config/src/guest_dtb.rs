@@ -1,7 +1,10 @@
 //! Description of the RV64 Linux virtual board, shared by staging and provisioning.
 //! Ownership/Lock Ordering: render into private host storage; no live guest or locks.
 //! Invariants: CPU nodes, interrupts, memory and initrd all describe the same VmConfig.
-use crate::{Error, GuestBoardLayout, MAX_GUEST_VCPUS, MmioRegion, VmConfig};
+use crate::{
+    Error, GuestBoardLayout, GuestIrqConfig, GuestIrqController, MAX_GUEST_VCPUS, MmioRegion,
+    VmConfig,
+};
 mod sstc;
 mod writer;
 pub use sstc::riscv_sstc;
@@ -38,9 +41,12 @@ pub fn riscv_with_sstc(
     if !layout.admits_ram(vm.guest_base, vm.memory_size) {
         return Err(Error::Memory);
     }
-    if !(1..=MAX_GUEST_VCPUS).contains(&vm.vcpus) || hz == 0 || args.as_bytes().contains(&0) {
+    if hz == 0 || args.as_bytes().contains(&0) {
         return Err(Error::Dtb);
     }
+    let irq = layout
+        .irq_config(vm.vcpus, vm.aia)
+        .map_err(|_| Error::Dtb)?;
     let mut f = Writer::new(out)?;
     f.begin(&[])?;
     f.text(
@@ -74,7 +80,7 @@ pub fn riscv_with_sstc(
     })?;
     f.end()?;
     cpus(&mut f, vm, hz, sstc)?;
-    interrupts(&mut f, vm, layout)?;
+    interrupts(&mut f, irq)?;
     device(
         &mut f,
         b"uart",
@@ -154,18 +160,13 @@ fn cpus(f: &mut Writer<'_>, vm: &VmConfig, hz: u32, sstc: bool) -> Result {
     }
     f.end()
 }
-fn interrupts(f: &mut Writer<'_>, vm: &VmConfig, layout: GuestBoardLayout) -> Result {
-    let (name, compatible, region): (&[u8], _, _) = if vm.aia {
-        (b"aplic", "riscv,aplic", layout.aplic)
-    } else {
-        (
-            b"plic",
-            "riscv,plic0",
-            layout.plic_contexts(vm.vcpus).ok_or(Error::Dtb)?,
-        )
+fn interrupts(f: &mut Writer<'_>, irq: GuestIrqConfig) -> Result {
+    let (name, compatible, region): (&[u8], _, _) = match irq.controller {
+        GuestIrqController::Legacy { region } => (b"plic", "riscv,plic0", region),
+        GuestIrqController::Advanced { wired, .. } => (b"aplic", "riscv,aplic", wired),
     };
     let mut entries = [0; 8 * MAX_GUEST_VCPUS as usize];
-    let contexts = &mut entries[..8 * usize::from(vm.vcpus)];
+    let contexts = &mut entries[..8 * usize::from(irq.vcpus)];
     for (cpu, pair) in contexts.chunks_exact_mut(8).enumerate() {
         pair[..4].copy_from_slice(&(CPU_INTC + cpu as u32).to_be_bytes());
         pair[4..].copy_from_slice(&EXTERNAL.to_be_bytes());
@@ -176,25 +177,25 @@ fn interrupts(f: &mut Writer<'_>, vm: &VmConfig, layout: GuestBoardLayout) -> Re
     f.u32("phandle", CONTROLLER)?;
     f.prop("interrupt-controller", &[])?;
     f.u32("#address-cells", 0)?;
-    f.u32("#interrupt-cells", if vm.aia { 2 } else { 1 })?;
-    if !vm.aia {
+    let GuestIrqController::Advanced { message, ids, .. } = irq.controller else {
+        f.u32("#interrupt-cells", 1)?;
         f.u32("riscv,ndev", 31)?;
         f.prop("interrupts-extended", &[contexts])?;
         return f.end();
-    }
+    };
+    f.u32("#interrupt-cells", 2)?;
     f.u32("riscv,num-sources", 31)?;
     f.u32("msi-parent", MSI)?;
     f.end()?;
-    let files = layout.imsic_files(vm.vcpus).ok_or(Error::Dtb)?;
-    f.at(b"imsics", files.base)?;
+    f.at(b"imsics", message.base)?;
     f.text("compatible", "riscv,imsics")?;
-    f.reg(files)?;
+    f.reg(message)?;
     f.u32("#interrupt-cells", 0)?;
     f.u32("#msi-cells", 0)?;
     f.prop("interrupt-controller", &[])?;
     f.prop("msi-controller", &[])?;
     f.u32("phandle", MSI)?;
-    f.u32("riscv,num-ids", layout.imsic_ids.max_id() as u32)?;
+    f.u32("riscv,num-ids", ids.max_id() as u32)?;
     f.prop("interrupts-extended", &[contexts])?;
     f.end()
 }

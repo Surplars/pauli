@@ -9,6 +9,9 @@ SECTIONS {
     .data : ALIGN(4096) {
         PROVIDE(__global_pointer$ = . + 0x800);
         *(.data .data.* .sdata .sdata.* .got .got.*)
+        /* Offset the 64-byte wire header so each 128-byte owner record starts aligned. */
+        . = ALIGN(128) + 64;
+        KEEP(*(.pauli_hs_stats))
     } > PAYLOAD
     .bss (NOLOAD) : ALIGN(4096) {
         __bss_start = .;
@@ -30,4 +33,5 @@ SECTIONS {
     ASSERT(wave8_service_start % 4K == 0 && wave8_service_end - wave8_service_start <= 4K, "invalid service RX page")
     ASSERT(. <= ORIGIN(PAYLOAD) + LENGTH(PAYLOAD), "Wave8 HS payload overlaps initrd")
     /DISCARD/ : { *(.eh_frame .eh_frame.* .gcc_except_table*) }
+    ASSERT((PAULI_HS_STATS + 64) % 128 == 0, "HS stats owner records must be 128-byte aligned")
 }

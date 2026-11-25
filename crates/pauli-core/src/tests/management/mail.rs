@@ -7,6 +7,78 @@ use crate::{
 };
 use pauli_control::{Backend, ChildName, Error, MailChunk, MailMessage, VmId, abi, queue::Poll};
 
+#[test]
+fn mail_completions_are_counted_once_on_the_issuing_owner() {
+    use crate::{
+        arch::{Control, ControlReply, ExitKind},
+        tests::model::OWNER,
+        trace::{HsStats, StatsTracer},
+        vm::slot::CpuState,
+    };
+    use core::sync::atomic::Ordering::Relaxed;
+    let f = Fixture::with_config(2, [1, 1], 0, |slot, vm| {
+        let mut owners = [0; pauli_config::MAX_GUEST_VCPUS as usize];
+        owners[0] = (1 - slot) as u8;
+        vm.cpu_affinity = pauli_config::CpuAffinity::Physical(owners);
+        *vm = vm.renamed(["manager", "service"][slot]).unwrap();
+    });
+    let rt = &f.runtime;
+    rt.board.boot_service.store(true, Relaxed);
+    let mut monitor = Monitor::new();
+    for slot in 0..2 {
+        rt.manager.start(rt.board, slot).unwrap();
+        monitor.poll(rt);
+    }
+    let stats = HsStats::new();
+    stats.init_host(2, 0);
+    let mut owners = [0, 1].map(|idx| {
+        stats.register_owner(idx, idx + 20, false);
+        Dispatcher::with_tracer(StatsTracer::with_stats(&stats, idx).unwrap())
+    });
+    let counts = || {
+        [0, 1].map(|i: usize| {
+            (
+                stats.owners[i].mail_sends.load(Relaxed),
+                stats.owners[i].mail_recvs.load(Relaxed),
+            )
+        })
+    };
+    let mut run = |slot: usize, op, epoch| {
+        let vm = rt.manager.vm(slot).unwrap();
+        let cpu = vm.cpu(0).unwrap();
+        cpu.data
+            .lock()
+            .context
+            .as_mut()
+            .unwrap()
+            .script
+            .push_back(ExitKind::Control(Control::Management {
+                args: [abi::VERSION, op, (2 - slot) as u64, epoch, 0, 0],
+            }));
+        OWNER.with(|o| o.set(cpu.owner));
+        rt.dispatch(&mut owners[cpu.owner]).unwrap();
+        assert_eq!(cpu.data.lock().state, CpuState::Blocked);
+        let before = counts();
+        OWNER.with(|o| o.set(0));
+        monitor.poll(rt);
+        assert_eq!(
+            counts(),
+            before,
+            "the management pump must not update another owner's slot"
+        );
+        OWNER.with(|o| o.set(cpu.owner));
+        rt.dispatch(&mut owners[cpu.owner]).unwrap();
+        cpu.data.lock().context.as_ref().unwrap().reply.unwrap()
+    };
+    let reply = |error, value| ControlReply::Transport { error, value };
+    assert_eq!(run(1, abi::MAIL_RECV, 0), reply(0, 0));
+    assert_eq!(run(0, abi::MAIL_SEND, 0), reply(0, 0)); // Present zero-byte message.
+    assert_eq!(run(1, abi::MAIL_RECV, 0), reply(0, 1 << 51));
+    assert_eq!(run(0, abi::MAIL_SEND, 99), reply(abi::INVALID_STATE, 0));
+    assert_eq!(run(1, abi::MAIL_RECV, 0), reply(0, 0));
+    assert_eq!(counts(), [(0, 1), (1, 0)]);
+}
+
 fn wire(
     f: &Fixture,
     monitor: &mut Monitor,

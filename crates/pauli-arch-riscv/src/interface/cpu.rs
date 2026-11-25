@@ -57,7 +57,7 @@ impl ArchVcpu for VirtualCpu {
     unsafe fn run_with_trace(
         &mut self,
         opts: arch::RunOptions<'_, Self>,
-        mut sample: Option<&mut arch::GuestSample>,
+        sample: Option<&mut arch::GuestSample>,
     ) -> Result<arch::VcpuExit> {
         let mut io = Io {
             inner: opts.io,
@@ -65,7 +65,7 @@ impl ArchVcpu for VirtualCpu {
         };
         // SAFETY: core transfers the IRQ-masked native owner with retained space and sole timer.
         let exit = unsafe {
-            Self::run_with_interval(
+            Self::run_sampled(
                 self,
                 crate::vcpu::RunOptions {
                     space: opts.space,
@@ -74,7 +74,7 @@ impl ArchVcpu for VirtualCpu {
                     physical: &mut opts.timer.0,
                     resident: Some(&mut opts.resident.bank),
                 },
-                sample.as_deref_mut().map(|s| &mut s.interval),
+                sample,
             )
         }
         .map_err(error)?;
@@ -84,9 +84,6 @@ impl ArchVcpu for VirtualCpu {
             crate::vcpu::Disposition::Fault => ExitKind::Fault,
             _ => action(exit.sbi.ok_or(HvError::InvalidState)?)?,
         };
-        if let Some(sample) = sample {
-            sample.source = crate::VmExit::source(exit.raw.cause, exit.wfi, exit.mmio);
-        }
         Ok(arch::VcpuExit {
             kind,
             cause: exit.raw.cause,
@@ -110,6 +107,9 @@ impl ArchVcpu for VirtualCpu {
     }
     fn wake_pending(&mut self) -> bool {
         self.poll_wakeup()
+    }
+    fn virtual_timer_asserted(&self) -> bool {
+        self.timer_asserted()
     }
     fn finish_control(&mut self, reply: ControlReply) -> Result<()> {
         let (code, value) = match reply {

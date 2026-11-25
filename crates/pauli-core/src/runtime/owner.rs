@@ -62,6 +62,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 return Ok(false);
             }
         }
+        let mut timer_irq = false;
         let owned = {
             let mut data = slot.data.lock();
             // A quiet WFI lane only needs its saved interrupt state, not a
@@ -73,8 +74,13 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 && !slot.mailbox.lock().pending()
             {
                 if let Some(cpu) = &mut data.context {
-                    if !Self::wake_waiter(vm, slot, cpu) {
+                    let (wake, raised) = Self::wake_waiter::<R>(vm, slot, cpu);
+                    timer_irq = raised;
+                    if !wake {
                         drop(data);
+                        if timer_irq {
+                            local.tracer.on_vtimer_irq();
+                        }
                         vm.lifecycle.release_owner(slot.index);
                         return Ok(false);
                     }
@@ -90,6 +96,9 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 protected_ticks: data.protected_ticks,
             })
         };
+        if timer_irq {
+            local.tracer.on_vtimer_irq();
+        }
         let Some(mut owned) = owned else {
             vm.lifecycle.release_owner(slot.index);
             return Err(HvError::InvalidState);
@@ -133,7 +142,7 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             owned.state = CpuState::Runnable;
         }
         if let Some(pending) = &owned.pending {
-            let Some(reply) = self.poll_pending(vm, slot.index, pending) else {
+            let Some(reply) = self.poll_pending(vm, slot.index, pending, &mut local.tracer) else {
                 return Ok(false);
             };
             // The fence drain or management poll already consumed its registration.
@@ -142,8 +151,14 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             owned.cpu.finish_control(reply)?;
             owned.state = CpuState::Runnable;
         }
-        if owned.state == CpuState::Waiting && Self::wake_waiter(vm, slot, &mut owned.cpu) {
-            owned.state = CpuState::Runnable;
+        if owned.state == CpuState::Waiting {
+            let (wake, timer_irq) = Self::wake_waiter::<R>(vm, slot, &mut owned.cpu);
+            if timer_irq {
+                local.tracer.on_vtimer_irq();
+            }
+            if wake {
+                owned.state = CpuState::Runnable;
+            }
         }
         let Some(peer) = visit.peer().filter(|_| owned.state == CpuState::Runnable) else {
             return Ok(false);
@@ -207,14 +222,23 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
     }
     // A wake check only makes the vCPU runnable. Guest entry still samples
     // the current line under the IRQ-chip lock before loading its bank.
-    fn wake_waiter(vm: &Vm<A>, slot: &VcpuSlot<A::Vcpu>, cpu: &mut A::Vcpu) -> bool {
+    fn wake_waiter<R: Tracer>(
+        vm: &Vm<A>,
+        slot: &VcpuSlot<A::Vcpu>,
+        cpu: &mut A::Vcpu,
+    ) -> (bool, bool) {
         let external =
             vm.devices
                 .irqs
                 .lock()
                 .owner_pending::<A::Smp>(slot.index, slot.owner, A::Timer::now);
         cpu.set_external_irq(external);
-        cpu.wake_pending()
+        let asserted = R::TRACE_EXITS && cpu.virtual_timer_asserted();
+        let wake = cpu.wake_pending();
+        (
+            wake,
+            R::TRACE_EXITS && !asserted && cpu.virtual_timer_asserted(),
+        )
     }
     fn run_slice<R: Tracer>(
         &self,
@@ -272,7 +296,10 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                 local.tracer.on_slice_start(slot.index);
             }
             local.tracer.on_vm_enter(slot.index);
-            let mut sample = arch::GuestSample::default();
+            let mut sample = arch::GuestSample {
+                measure_elapsed: R::MEASURE_ELAPSED,
+                ..Default::default()
+            };
             let mut io = DeviceIo {
                 devices: &vm.devices,
                 origin: slot.index,
@@ -294,11 +321,16 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
                         timer: &mut local.timer,
                         resident: bank,
                     },
-                    R::MEASURE_ELAPSED.then_some(&mut sample),
+                    (R::MEASURE_ELAPSED || R::TRACE_EXITS).then_some(&mut sample),
                 )
             }?;
             entered = true;
             let (console_tx, console_full) = (io.console_tx, io.console_full);
+            if R::TRACE_EXITS {
+                local
+                    .tracer
+                    .on_guest_exit(sample.source, &exit, sample.vtimer_irq);
+            }
             let elapsed = if R::MEASURE_ELAPSED {
                 local
                     .tracer

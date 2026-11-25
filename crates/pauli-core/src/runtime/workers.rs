@@ -23,6 +23,10 @@ pub enum WorkerStartupError {
 impl<A: HvArch, B: Board> VmRuntime<A, B> {
     pub fn start_workers(&'static self) -> core::result::Result<(), WorkerStartupError> {
         let info = self.board.info();
+        if B::COLLECT_HS_STATS {
+            crate::trace::init_host(info.host_cpus, self.manager.exclusive_owners());
+            self.register_stats_owner(info.boot_cpu);
+        }
         let mut expected = 0u64;
         for owner in 0..info.host_cpus {
             if owner == info.boot_cpu {
@@ -30,11 +34,12 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
             }
             // SAFETY: self is static, fully initialized, and each arch worker
             // supplies its own retained stack and explicit native CPU identity.
-            unsafe { A::Smp::start(owner, worker::<A, B>, self as *const Self as usize) }
-                .map_err(|mut failure| {
+            unsafe { A::Smp::start(owner, worker::<A, B>, self as *const Self as usize) }.map_err(
+                |mut failure| {
                     failure.hart = failure.hart.or_else(|| A::Smp::hart_id(owner));
                     WorkerStartupError::HsmStart { owner, failure }
-                })?;
+                },
+            )?;
             expected |= 1u64 << owner;
         }
         if expected != 0 {
@@ -69,19 +74,41 @@ impl<A: HvArch, B: Board> VmRuntime<A, B> {
     }
 
     pub(crate) fn publish_worker_online(&self, owner: usize) {
+        self.register_stats_owner(owner);
         self.online_workers
             .fetch_or(1u64 << owner, Ordering::Release);
+    }
+
+    fn register_stats_owner(&self, owner: usize) {
+        if B::COLLECT_HS_STATS
+            && let Some(hart) = A::Smp::hart_id(owner)
+        {
+            // The architecture completed the local timer probe before this owner's ready ACK.
+            crate::trace::register_owner(owner, hart, A::sstc_available_for_owners(1 << owner));
+        }
     }
 }
 extern "C" fn worker<A: HvArch, B: Board>(opaque: usize) -> ! {
     // SAFETY: only start_workers passes this retained, release-published runtime pointer.
     let runtime = unsafe { &*(opaque as *const VmRuntime<A, B>) };
     // ArchSmp enters here after this owner has its trap vector and wake sources.
-    runtime.publish_worker_online(A::Smp::cpu_id());
+    let owner = A::Smp::cpu_id();
+    runtime.publish_worker_online(owner);
     while !runtime.ready.load(Ordering::Acquire) {
         core::hint::spin_loop();
     }
-    let mut local = Dispatcher::new();
+    if B::COLLECT_HS_STATS
+        && let Some(trace) = crate::trace::StatsTracer::registered_owner(owner)
+    {
+        run_worker(runtime, Dispatcher::with_tracer(trace));
+    }
+    run_worker(runtime, Dispatcher::new())
+}
+
+fn run_worker<A: HvArch, B: Board, R: Tracer>(
+    runtime: &VmRuntime<A, B>,
+    mut local: Dispatcher<A::Timer, R>,
+) -> ! {
     loop {
         match runtime.dispatch(&mut local) {
             Ok(false) => {

@@ -79,19 +79,10 @@ pub struct IrqFileStats {
     pub bound: usize,
 }
 pub trait VirtualIrqChip: Send {
-    fn create(vcpus: u8, advanced: bool) -> Result<Self>
+    /// Construct the same interrupt geometry the board advertised in its guest DTB.
+    fn create_configured(irq: pauli_config::GuestIrqConfig) -> Result<Self>
     where
         Self: Sized;
-    /// Construct the same interrupt geometry the board advertised in its guest DTB.
-    fn create_with_imsic_ids(vcpus: u8, advanced: bool, ids: pauli_config::ImsicIds) -> Result<Self>
-    where
-        Self: Sized,
-    {
-        if advanced && ids != pauli_config::ImsicIds::Ids255 {
-            return Err(HvError::Unsupported);
-        }
-        Self::create(vcpus, advanced)
-    }
     fn access(&mut self, region: IrqRegion, offset: usize, write: Option<usize>) -> Option<usize>;
     fn register(&mut self, cpu: u8, access: RegisterAccess) -> Option<usize>;
     fn set_level(&mut self, source: u32, asserted: bool);
@@ -172,6 +163,10 @@ pub enum ExitKind {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExitSource {
     Timer,
+    /// Native HS timer interrupt on a hart using the direct compare register.
+    SstcTimer,
+    /// Guest SBI set_timer request accepted by the hypervisor.
+    SbiTimer,
     External,
     Software,
     SupervisorCall,
@@ -202,10 +197,28 @@ impl TickInterval {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct GuestSample {
+    pub measure_elapsed: bool,
     pub interval: TickInterval,
     pub source: ExitSource,
+    /// Software injection raised the virtual timer interrupt during this run.
+    pub vtimer_irq: bool,
+}
+impl Default for GuestSample {
+    fn default() -> Self {
+        Self {
+            measure_elapsed: true,
+            interval: TickInterval::default(),
+            source: ExitSource::Other,
+            vtimer_irq: false,
+        }
+    }
+}
+impl GuestSample {
+    pub fn timing(&mut self) -> Option<&mut TickInterval> {
+        self.measure_elapsed.then_some(&mut self.interval)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -275,7 +288,7 @@ pub trait ArchVcpu: Send + Sized {
     ) -> Result<VcpuExit> {
         if let Some(sample) = sample {
             sample.source = ExitSource::Other;
-            TickInterval::measure(Some(&mut sample.interval), Self::Timer::now, || {
+            TickInterval::measure(sample.timing(), Self::Timer::now, || {
                 // SAFETY: the caller retains the same run contract.
                 unsafe { self.run(options) }
             })
@@ -289,6 +302,10 @@ pub trait ArchVcpu: Send + Sized {
     /// Earliest enabled timer that can end this vCPU's WFI, in absolute native ticks.
     fn wait_deadline(&self) -> Option<u64>;
     fn wake_pending(&mut self) -> bool;
+    /// The software-injected timer level. Direct hardware delivery is unobservable from HS.
+    fn virtual_timer_asserted(&self) -> bool {
+        false
+    }
     fn finish_control(&mut self, reply: ControlReply) -> Result<()>;
     /// # Safety
     /// Off-CPU context, matching pinned native owner, banks put, IRQs masked.
